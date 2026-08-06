@@ -1,0 +1,489 @@
+package org.icij.datashare.web;
+
+import co.elastic.clients.elasticsearch._types.Refresh;
+import net.codestory.http.filters.basic.BasicAuthFilter;
+import net.codestory.http.security.Users;
+import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.asyncsearch.MemoryAsyncSearchStore;
+import org.icij.datashare.db.JooqRepository;
+import org.icij.datashare.json.JsonObjectMapper;
+import org.icij.datashare.session.DatashareUser;
+import org.icij.datashare.session.LocalUserFilter;
+import org.icij.datashare.test.ElasticsearchRule;
+import org.icij.datashare.text.DocumentBuilder;
+import org.icij.datashare.text.indexing.elasticsearch.ElasticsearchIndexer;
+import org.icij.datashare.web.testhelpers.AbstractProdWebServerTest;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.ClassRule;
+import org.junit.Test;
+import org.mockito.Mock;
+
+import net.codestory.rest.Response;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.fest.assertions.Assertions.assertThat;
+import static org.mockito.Mockito.when;
+import static org.mockito.MockitoAnnotations.initMocks;
+
+public class IndexResourceTest extends AbstractProdWebServerTest {
+    @Mock JooqRepository jooqRepository;
+    @ClassRule public static ElasticsearchRule es = new ElasticsearchRule(3);
+    private final ElasticsearchIndexer indexer = new ElasticsearchIndexer(es.client, new PropertiesProvider()).withRefresh(Refresh.True);
+    private final PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+        put("defaultUserName", "test");
+        put("mode", "LOCAL");
+    }});
+    private final PropertiesProvider serverModeProvider = new PropertiesProvider(new HashMap<>() {{
+        put("defaultUserName", "test");
+        put("mode", "SERVER");
+    }});
+
+    @Test
+    public void test_get_cluster_info_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index").should().respond(200).contain("cluster_name");
+    }
+
+    @Test
+    public void test_get_cluster_info_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index").should().respond(403);
+    }
+
+    @Test
+    public void test_no_auth_get_forward_request_to_elastic() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/search/%s/_search".formatted(es.getIndexName())).should().respond(200).contain("\"successful\":1");
+    }
+
+    @Test
+    public void test_no_auth_get_forward_request_to_elastic_if_granted_to_read_index() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/search/unauthorized/_search").should().respond(401);
+    }
+    @Test
+    public void test_no_auth_get_forward_request_to_elastic_with_empty_indice() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/search/    /_search").should().respond(400);
+        get("/api/index/search/!!/_search").should().respond(400);
+    }
+    @Test
+    public void test_no_auth_get_unauthorized_on_unknown_index() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/search/hacker/bar/baz").should().respond(401);
+    }
+    @Test
+    public void test_put_create_local_index_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        put("/api/index/index_name").should().respond(201);
+        put("/api/index/ !!").should().respond(400);
+        put("/api/index/  /").should().respond(404);
+    }
+    @Test
+    public void test_no_auth_post_forward_request_to_elastic_with_body() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/search/%s/_search".formatted(es.getIndexName()), "{}").should().respond(200).contain("\"successful\":1");
+        post("/api/index/search/  \\").should().respond(400);
+        post("/api/index/search/  /  ").should().respond(400);
+        post("/api/index/search/unauthorized/_search").should().respond(401);
+    }
+
+    @Test
+    public void test_no_auth_options_forward_request_to_elastic() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        options("/api/index/search/%s".formatted(es.getIndexName())).should().respond(200);
+        options("/api/index/search/  /").should().respond(400);
+        options("/api/index/search/  \\").should().respond(400);
+    }
+
+    @Test
+    public void test_delete_should_return_method_not_allowed() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider)).filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        delete("/api/index/search/foo/bar").should().respond(405);
+    }
+
+    @Test
+    public void test_auth_forward_request_with_user_logged_on() throws IOException {
+        configure(routes -> {
+            Users users =  DatashareUser.singleUser("cecile");
+            routes
+                    .add(new IndexResource(indexer, propertiesProvider))
+                    .filter(new BasicAuthFilter("/", "icij", users));
+        });
+        indexer.add("cecile-datashare", DocumentBuilder.createDoc("1234567890abcdef").withRootId("rootId").build());
+        get("/api/index/search/cecile-datashare/_search?routing=rootId").withPreemptiveAuthentication("cecile", "").should().
+                respond(200).contain("1234567890abcdef");
+
+        get("/api/index/search/hacker/foo/bar?routing=baz").withPreemptiveAuthentication("cecile", "").should().respond(401);
+        post("/api/index/search/hacker/foo/bar").withPreemptiveAuthentication("cecile", "").should().respond(401);
+    }
+
+    @Test
+    public void test_auth_forward_request_with_user_logged_on_only_allow_search_and_count_on_post() throws IOException {
+        configure(routes -> {
+                Users users =  DatashareUser.singleUser("cecile");
+                routes
+                    .add(new IndexResource(indexer, propertiesProvider))
+                    .filter(new BasicAuthFilter("/", "icij", users));
+        });
+        indexer.add("cecile-datashare", DocumentBuilder.createDoc("1234567890abcdef").build());
+        post("/api/index/search/cecile-datashare/_search").withPreemptiveAuthentication("cecile", "").should().respond(200);
+        get("/api/index/search/cecile-datashare/_doc/1234567890abcdef").withPreemptiveAuthentication("cecile", "").should().respond(200);
+        post("/api/index/search/_search/scroll", "{\"scroll_id\":\"DXF1ZXJ5QW5kRmV0Y2gBAAAAAAAAAD4WYm9laVYtZndUQlNsdDcwakFMNjU1QQ\"}").withPreemptiveAuthentication("cecile", "").should().respond(500);
+        post("/api/index/search/cecile-datashare/_count").withPreemptiveAuthentication("cecile", "").should().respond(200);
+
+        post("/api/index/search/cecile-datashare/_delete_by_query").withPreemptiveAuthentication("cecile", "").should().respond(401);
+    }
+
+    @Test
+    public void test_auth_forward_request_with_user_logged_on_allow_search_on_multiple_indices() throws IOException {
+        configure(routes ->
+                routes.add(new IndexResource(indexer, propertiesProvider)).
+                        filter(new BasicAuthFilter("/", "icij", DatashareUser.singleUser(new DatashareUser(new HashMap<>() {{
+                            put("uid", "cecile");
+                            put("groups_by_applications", Map.of("datashare", List.of(es.getIndexNames()[1], es.getIndexNames()[2])));
+                        }})))));
+        indexer.add(es.getIndexNames()[1], DocumentBuilder.createDoc("doc1").withRootId("rootId").build());
+        indexer.add(es.getIndexNames()[2], DocumentBuilder.createDoc("doc2").withRootId("rootId").build());
+        post("/api/index/search/%s,%s/_search".formatted(es.getIndexNames()[1], es.getIndexNames()[2]))
+                .withPreemptiveAuthentication("cecile", "").should().respond(200);
+        post("/api/index/search/%s,%s/_count".formatted(es.getIndexNames()[1], es.getIndexNames()[2]))
+                .withPreemptiveAuthentication("cecile", "").should().respond(200);
+
+        post("/api/index/search/%s,%s/_delete_by_query".formatted(es.getIndexNames()[1], es.getIndexNames()[2]))
+                .withPreemptiveAuthentication("cecile", "").should().respond(401);
+    }
+
+    @Test
+    public void test_auth_forward_request_with_user_logged_on_multiple_indices_with_bad_requests() throws IOException {
+        configure(routes ->
+                routes.add(new IndexResource(indexer, propertiesProvider)).
+                        filter(new BasicAuthFilter("/", "icij", DatashareUser.singleUser(new DatashareUser(new HashMap<>() {{
+                            put("uid", "cecile");
+                            put("groups_by_applications", Map.of("datashare", List.of(es.getIndexNames()[1], es.getIndexNames()[2])));
+                        }})))));
+        indexer.add(es.getIndexNames()[1], DocumentBuilder.createDoc("doc1").withRootId("rootId").build());
+        indexer.add(es.getIndexNames()[2], DocumentBuilder.createDoc("doc2").withRootId("rootId").build());
+        post("/api/index/search/%s,  /_search".formatted(es.getIndexNames()[1])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        post("/api/index/search/,%s/_doc/_search".formatted(es.getIndexNames()[2])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        post("/api/index/search/,%s,/_count".formatted(es.getIndexNames()[2])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        post("/api/index/search/ %s  /_delete_by_query".formatted(es.getIndexNames()[1])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        get("/api/index/search/%s, %s".formatted(es.getIndexNames()[1],es.getIndexNames()[1])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        get("/api/index/search/,%s".formatted(es.getIndexNames()[1])).withPreemptiveAuthentication("cecile", "").should().respond(400);
+        get("/api/index/search/%s%s,%s".formatted(es.getIndexNames()[1],es.getIndexNames()[2],es.getIndexNames()[2]))
+                .withPreemptiveAuthentication("cecile", "").should().respond(400);
+    }
+    @Test
+    public void test_auth_forward_request_for_scroll_requests() {
+        post("/api/index/search/_search/scroll?scroll_id=DXF1ZXJ5QW5kRmV0Y2gBAAAAAAAAAD4WYm9laVYtZndUQlNsdDcwakFMNjU1QQ").withPreemptiveAuthentication("cecile", "").should().respond(500);
+    }
+
+    @Test
+    public void test_put_should_return_method_not_allowed() {
+        put("/api/index/search/cecile-datashare/_search").withPreemptiveAuthentication("cecile", "pass").should().respond(405);
+    }
+
+    @Test
+    public void test_put_createIndex() {
+        put("/api/index/cecile-datashare").withPreemptiveAuthentication("cecile", "pass").should().respond(201);
+        put("/api/index/!!").withPreemptiveAuthentication("cecile", "pass").should().respond(400);
+        put("/api/index/ cecile-datashare").withPreemptiveAuthentication("cecile", "pass").should().respond(400);
+    }
+
+    @Test
+    public void test_close_index_in_local_mode() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/%s/_close".formatted(es.getIndexName())).should().respond(200);
+        post("/api/index/%s/_open".formatted(es.getIndexName())).should().respond(200);
+    }
+
+    @Test
+    public void test_close_index_forwards_query_params() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/%s/_close?ignore_unavailable=true".formatted(es.getIndexName())).should().respond(200);
+        post("/api/index/%s/_open?ignore_unavailable=true".formatted(es.getIndexName())).should().respond(200);
+    }
+
+    @Test
+    public void test_close_index_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/%s/_close".formatted(es.getIndexName())).should().respond(403);
+    }
+
+    @Test
+    public void test_open_index_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/%s/_open".formatted(es.getIndexName())).should().respond(403);
+    }
+
+    @Test
+    public void test_close_index_with_invalid_name() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        post("/api/index/!!invalid/_close").should().respond(400);
+    }
+
+    @Test
+    public void test_get_snapshot_repositories_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_snapshot").should().respond(200);
+    }
+
+    @Test
+    public void test_get_snapshot_repositories_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_snapshot").should().respond(403);
+    }
+
+    @Test
+    public void test_delete_snapshot_repository_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        delete("/api/index/_snapshot/my-repo").should().respond(403);
+    }
+
+    @Test
+    public void test_get_nodes_settings_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_nodes/settings").should().respond(200);
+    }
+
+    @Test
+    public void test_get_nodes_settings_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_nodes/settings").should().respond(403);
+    }
+
+    @Test
+    public void test_get_nodes_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_nodes").should().respond(200);
+    }
+
+    @Test
+    public void test_get_cluster_settings_in_local_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_cluster/settings").should().respond(200);
+    }
+
+    @Test
+    public void test_get_cluster_settings_forbidden_in_server_mode() {
+        configure(routes -> routes.add(new IndexResource(indexer, serverModeProvider))
+                .filter(new LocalUserFilter(serverModeProvider, jooqRepository, es.getIndexNames())));
+        get("/api/index/_cluster/settings").should().respond(403);
+    }
+
+    private final MemoryAsyncSearchStore asyncSearchStore = new MemoryAsyncSearchStore();
+
+    @Test
+    public void test_async_search_submit_records_ownership() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.singleUser("cecile"))));
+        indexer.add("cecile-datashare", DocumentBuilder.createDoc("doc-async-1").build());
+
+        // keep_on_completion=true forces ES to return an id even on a fast/tiny index
+        Response response = post(
+                "/api/index/search/cecile-datashare/_async_search?wait_for_completion_timeout=0&keep_on_completion=true&keep_alive=5m",
+                "{\"query\":{\"match_all\":{}}}")
+                .withPreemptiveAuthentication("cecile", "").response();
+
+        String id = JsonObjectMapper.getMapper().readTree(response.content()).get("id").asText();
+        assertThat(asyncSearchStore.get(id).isPresent()).isTrue();
+        assertThat(asyncSearchStore.get(id).get().userId).isEqualTo("cecile");
+        assertThat(asyncSearchStore.get(id).get().projects).containsExactly("cecile-datashare");
+    }
+
+    private net.codestory.http.security.Users twoUsersGrantedTo(String index) {
+        DatashareUser alice = new DatashareUser(org.icij.datashare.user.User.localUser("alice", index));
+        DatashareUser bob = new DatashareUser(org.icij.datashare.user.User.localUser("bob", index));
+        return new net.codestory.http.security.Users() {
+            @Override public net.codestory.http.security.User find(String login, String pass) { return find(login); }
+            @Override public net.codestory.http.security.User find(String login) {
+                if ("alice".equals(login)) return alice;
+                if ("bob".equals(login)) return bob;
+                return null;
+            }
+        };
+    }
+
+    private String submitAsyncSearchAs(String login, String index) throws IOException {
+        Response response = post(
+                "/api/index/search/%s/_async_search?wait_for_completion_timeout=0&keep_on_completion=true&keep_alive=5m".formatted(index),
+                "{\"query\":{\"match_all\":{}}}")
+                .withPreemptiveAuthentication(login, "").response();
+        return JsonObjectMapper.getMapper().readTree(response.content()).get("id").asText();
+    }
+
+    private String urlEncode(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    @Test
+    public void test_async_search_poll_as_owner_returns_result() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        indexer.add(es.getIndexName(), DocumentBuilder.createDoc("doc-poll-1").build());
+
+        String id = submitAsyncSearchAs("alice", es.getIndexName());
+        get("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("alice", "").should()
+                .respond(200).contain("\"is_running\"");
+    }
+
+    @Test
+    public void test_async_search_poll_as_other_user_returns_404() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        indexer.add(es.getIndexName(), DocumentBuilder.createDoc("doc-poll-2").build());
+
+        String id = submitAsyncSearchAs("alice", es.getIndexName());
+        get("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("bob", "").should().respond(404);
+    }
+
+    @Test
+    public void test_async_search_poll_unknown_id_returns_404() {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        get("/api/index/search/_async_search/does-not-exist")
+                .withPreemptiveAuthentication("alice", "").should().respond(404);
+    }
+
+    @Test
+    public void test_async_search_poll_after_es_expiry_returns_404_and_cleans_up() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        indexer.add(es.getIndexName(), DocumentBuilder.createDoc("doc-poll-3").build());
+
+        String id = submitAsyncSearchAs("alice", es.getIndexName());
+        // Drop it directly on ES, leaving the ownership record behind so the
+        // proxy's GET hits an ES 404 (the store-vs-ES divergence case).
+        indexer.executeRaw("DELETE", "_async_search/" + id, null);
+
+        get("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("alice", "").should().respond(404);
+        assertThat(asyncSearchStore.get(id).isPresent()).isFalse();
+    }
+
+    @Test
+    public void test_async_search_cancel_as_owner_removes_record() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        indexer.add(es.getIndexName(), DocumentBuilder.createDoc("doc-cancel-1").build());
+
+        String id = submitAsyncSearchAs("alice", es.getIndexName());
+        assertThat(asyncSearchStore.get(id).isPresent()).isTrue();
+
+        delete("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("alice", "").should().respond(200);
+        assertThat(asyncSearchStore.get(id).isPresent()).isFalse();
+    }
+
+    @Test
+    public void test_async_search_cancel_as_other_user_returns_404() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", twoUsersGrantedTo(es.getIndexName()))));
+        indexer.add(es.getIndexName(), DocumentBuilder.createDoc("doc-cancel-2").build());
+
+        String id = submitAsyncSearchAs("alice", es.getIndexName());
+        delete("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("bob", "").should().respond(404);
+        // alice's record is untouched
+        assertThat(asyncSearchStore.get(id).isPresent()).isTrue();
+    }
+
+    @Test
+    public void test_delete_on_non_async_path_still_method_not_allowed() {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        delete("/api/index/search/foo/bar").should().respond(405);
+    }
+
+    @Test
+    public void test_async_search_options_advertises_get_and_delete() {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new LocalUserFilter(propertiesProvider, jooqRepository, es.getIndexNames())));
+        options("/api/index/search/_async_search/some-id").should().respond(200);
+        // The short-circuit must advertise GET/DELETE (set by allowMethods via the
+        // Access-Control-Allow-Methods header), not just return a generic 200.
+        Response response = options("/api/index/search/_async_search/some-id").response();
+        String allowMethods = String.join(",", response.header("Access-Control-Allow-Methods"));
+        assertThat(allowMethods).contains("GET").contains("DELETE");
+    }
+
+    @Test
+    public void test_async_search_submit_records_both_projects_for_multi_index() throws IOException {
+        String idx1 = es.getIndexNames()[1];
+        String idx2 = es.getIndexNames()[2];
+        DatashareUser user = new DatashareUser(new HashMap<>() {{
+            put("uid", "cecile");
+            put("groups_by_applications", Map.of("datashare", List.of(idx1, idx2)));
+        }});
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.singleUser(user))));
+        indexer.add(idx1, DocumentBuilder.createDoc("doc-multi-1").build());
+        indexer.add(idx2, DocumentBuilder.createDoc("doc-multi-2").build());
+
+        Response response = post(
+                "/api/index/search/%s,%s/_async_search?wait_for_completion_timeout=0&keep_on_completion=true&keep_alive=5m".formatted(idx1, idx2),
+                "{\"query\":{\"match_all\":{}}}")
+                .withPreemptiveAuthentication("cecile", "").response();
+        String id = JsonObjectMapper.getMapper().readTree(response.content()).get("id").asText();
+
+        assertThat(asyncSearchStore.get(id).isPresent()).isTrue();
+        assertThat(asyncSearchStore.get(id).get().projects).containsExactly(idx1, idx2);
+
+        // owner can poll the multi-index async search
+        get("/api/index/search/_async_search/" + urlEncode(id))
+                .withPreemptiveAuthentication("cecile", "").should().respond(200).contain("\"is_running\"");
+    }
+
+    @Test
+    public void test_async_search_submit_injects_default_keep_alive_when_absent() throws IOException {
+        configure(routes -> routes.add(new IndexResource(indexer, asyncSearchStore, propertiesProvider))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.singleUser("cecile"))));
+        indexer.add("cecile-datashare", DocumentBuilder.createDoc("doc-ka-1").build());
+
+        // No keep_alive param: the proxy must inject the default (5m) into the ES request.
+        Response response = post(
+                "/api/index/search/cecile-datashare/_async_search?wait_for_completion_timeout=0&keep_on_completion=true",
+                "{\"query\":{\"match_all\":{}}}")
+                .withPreemptiveAuthentication("cecile", "").response();
+
+        com.fasterxml.jackson.databind.JsonNode root = JsonObjectMapper.getMapper().readTree(response.content());
+        long expiration = root.get("expiration_time_in_millis").asLong();
+        long now = System.currentTimeMillis();
+        // With the 5m default injected, expiration is minutes away; ES's un-injected default is ~5 days.
+        assertThat(expiration - now).isLessThan(java.time.Duration.ofHours(1).toMillis());
+    }
+
+    @Before
+    public void setUp() {
+        initMocks(this);
+        when(jooqRepository.getProjects()).thenReturn(new ArrayList<>());
+    }
+
+    @After
+    public void tearDown() throws Exception {
+        es.delete("cecile-datashare", "index_name");
+    }
+}
+

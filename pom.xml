@@ -1,0 +1,679 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.icij.datashare</groupId>
+    <artifactId>datashare</artifactId>
+    <version>21.16.0</version>
+    <packaging>pom</packaging>
+
+    <name>ICIJ Datashare</name>
+    <url>https://datashare.icij.org</url>
+
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.en.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <inceptionYear>2016</inceptionYear>
+    <description>ICIJ Datashare - Better analyze information, in all its forms</description>
+
+    <organization>
+        <name>ICIJ</name>
+        <url>https://www.icij.org/</url>
+    </organization>
+
+    <developers>
+        <developer>
+            <name>ICIJ</name>
+            <email>datashare@icij.org</email>
+            <organization>ICIJ</organization>
+        </developer>
+    </developers>
+
+    <modules>
+        <module>commons-test</module>
+        <module>datashare-api</module>
+        <module>datashare-db</module>
+        <module>datashare-tasks</module>
+        <module>datashare-cli</module>
+        <module>datashare-index</module>
+        <module>datashare-nlp-corenlp</module>
+        <module>datashare-dist</module>
+        <module>datashare-app</module>
+    </modules>
+
+    <scm>
+        <url>https://github.com/ICIJ/datashare</url>
+        <connection>scm:git:https://github.com/ICIJ/datashare.git</connection>
+        <developerConnection>scm:git:https://github.com/ICIJ/datashare.git</developerConnection>
+    </scm>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>ossrh-staging-api</id>
+            <url>https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/</url>
+        </repository>
+    </distributionManagement>
+
+    <repositories>
+        <repository>
+            <name>Central Portal Snapshots</name>
+            <id>central-portal-snapshots</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
+
+    <properties>
+        <maven.test.redirectTestOutputToFile>true</maven.test.redirectTestOutputToFile>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+
+        <datashare-api.version>15.0.1</datashare-api.version>
+        <datashare-cli.version>13.6.1</datashare-cli.version>
+        <datashare-tasks.version>22.0.0</datashare-tasks.version>
+        <ftm.version>0.3.1</ftm.version>
+
+        <datashare-elasticsearch.version>${project.version}</datashare-elasticsearch.version>
+        <datashare-corenlp.version>${project.version}</datashare-corenlp.version>
+        <guice.version>7.0.0</guice.version>
+        <amazon.version>1.12.411</amazon.version>
+
+        <aws-s3.version>2.35.10</aws-s3.version>
+        <extract.version>9.15.6</extract.version>
+        <opennlp.version>1.6.0</opennlp.version>
+        <elasticsearch.version>8.19.8</elasticsearch.version>
+        <jooq.version>3.19.10</jooq.version>
+        <lucene.version>10.3.1</lucene.version>
+        <unidecode.version>0.0.7</unidecode.version>
+        <joda-time.version>2.9.5</joda-time.version>
+        <httpclient.version>4.5.13</httpclient.version>
+        <redisson.version>3.20.1</redisson.version>
+        <jackson.version>2.22.1</jackson.version>
+        <jackson-annotations.version>2.22</jackson-annotations.version>
+        <httpcore.version>4.4.13</httpcore.version>
+        <guava.version>33.6.0-jre</guava.version>
+        <xalan.version>2.7.2</xalan.version>
+        <xerces.version>2.12.2</xerces.version>
+        <!-- Force the whole ASM family to the version Tika 3.3.0 requires. nashorn-core:15.3 drags in
+             asm 7.3.1, which wins mediation and makes Tika's ClassParser fail on .class files with
+             "IllegalArgumentException: Unsupported api 589824" (ASM9). ASM 9.x is backward compatible
+             with Nashorn's ASM7-level usage, so pinning up is safe. -->
+        <asm.version>9.9.1</asm.version>
+        <commons-beanutils.version>1.7.0</commons-beanutils.version>
+        <jna.version>5.19.1</jna.version>
+        <bouncycastle.version>1.70</bouncycastle.version>
+        <httpcomponents.version>4.5.13</httpcomponents.version>
+        <joptsimple.version>6.0-alpha-3</joptsimple.version>
+        <slf4j.version>2.0.18</slf4j.version>
+        <logback.version>1.3.14</logback.version>
+        <log4jtoslf4j.version>2.17.2</log4jtoslf4j.version>
+        <log4-over-slf4j.version>2.17.2</log4-over-slf4j.version>
+        <junit.version>4.13.2</junit.version>
+        <fest-assert.version>1.4</fest-assert.version>
+        <mockito.version>5.14.2</mockito.version>
+
+        <!-- Maven Plugins -->
+        <maven-compiler.version>3.13.0</maven-compiler.version>
+        <maven-surefire.version>3.3.0</maven-surefire.version>
+        <maven-jar.version>3.0.2</maven-jar.version>
+        <maven-assembly.version>3.7.1</maven-assembly.version>
+        <maven-resources-plugin>3.0.2</maven-resources-plugin>
+        <maven-shade.version>3.5.3</maven-shade.version>
+        <maven-dependency.version>3.6.1</maven-dependency.version>
+        <maven-build-helper.version>1.10</maven-build-helper.version>
+        <maven-install.version>2.5.2</maven-install.version>
+        <maven-release.version>2.5.3</maven-release.version>
+        <maven-exec.version>1.5.0</maven-exec.version>
+        <maven-javadoc.version>3.1.0</maven-javadoc.version>
+        <git-commit-id-maven-plugin.version>9.0.0</git-commit-id-maven-plugin.version>
+
+        <!-- Env file -->
+        <devenv.file>${maven.multiModuleProjectDirectory}/datashare-devenv.properties</devenv.file>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-api</artifactId>
+                <version>${datashare-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-cli</artifactId>
+                <version>${datashare-cli.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-tasks</artifactId>
+                <version>${datashare-tasks.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-db</artifactId>
+                <version>${project.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>commons-test</artifactId>
+                <version>${project.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij</groupId>
+                <artifactId>ftm.java</artifactId>
+                <version>${ftm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>net.sf.jopt-simple</groupId>
+                <artifactId>jopt-simple</artifactId>
+                <version>${joptsimple.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-web</artifactId>
+                <version>${project.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-index</artifactId>
+                <version>${datashare-elasticsearch.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-nlp-corenlp</artifactId>
+                <version>${datashare-corenlp.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.icij.datashare</groupId>
+                <artifactId>datashare-nlp-opennlp</artifactId>
+                <version>${datashare-opennlp.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>org.icij.extract</groupId>
+                <artifactId>extract-lib</artifactId>
+                <version>${extract.version}</version>
+            </dependency>
+
+            <!-- ASM family pinned to the version Tika's ClassParser expects (see asm.version). This
+                 overrides the older 7.3.1 pulled transitively by nashorn-core regardless of tree depth. -->
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-tree</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-commons</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-analysis</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-util</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>me.xuender</groupId>
+                <artifactId>unidecode</artifactId>
+                <version>${unidecode.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk15on</artifactId>
+                <version>${bouncycastle.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcmail-jdk15on</artifactId>
+                <version>${bouncycastle.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>net.java.dev.jna</groupId>
+                <artifactId>jna</artifactId>
+                <version>${jna.version}</version>
+            </dependency>
+
+            <!-- Guava/Guice -->
+            <dependency>
+                <groupId>com.google.inject</groupId>
+                <artifactId>guice</artifactId>
+                <version>${guice.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.inject.extensions</groupId>
+                <artifactId>guice-assistedinject</artifactId>
+                <version>${guice.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>${guava.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>joda-time</groupId>
+                <artifactId>joda-time</artifactId>
+                <version>${joda-time.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>co.elastic.clients</groupId>
+                <artifactId>elasticsearch-java</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpclient</artifactId>
+                <version>${httpclient.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpcore-nio</artifactId>
+                <version>${httpcore.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpcore</artifactId>
+                <version>${httpcore.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>xalan</groupId>
+                <artifactId>xalan</artifactId>
+                <version>${xalan.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>xerces</groupId>
+                <artifactId>xercesImpl</artifactId>
+                <version>${xerces.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- Slf4j/Logback -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+                <version>${logback.version}</version>
+            </dependency>
+
+            <!--
+            for legacy libraries that use log4j API
+            for example apache commons-logging
+            see https://stackoverflow.com/questions/31044619/difference-between-slf4j-log4j12-and-log4j-over-slf4j
+            -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>log4j-over-slf4j</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+
+
+            <!-- tests -->
+            <dependency>
+                <groupId>junit</groupId>
+                <artifactId>junit</artifactId>
+                <version>${junit.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.easytesting</groupId>
+                <artifactId>fest-assert</artifactId>
+                <version>${fest-assert.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>com.amazonaws</groupId>
+                <artifactId>aws-java-sdk-bom</artifactId>
+                <version>${amazon.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-bom</artifactId>
+                <version>2.25.2</version>
+                <scope>import</scope>
+                <type>pom</type>
+            </dependency>
+            <!-- Force commons-csv to 1.14.0 to override jcasbin's 1.12.0 transitive dependency.
+                 Tika 3.x requires CSVParser.builder() which was added in 1.14.0. -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-csv</artifactId>
+                <version>1.14.0</version>
+            </dependency>
+            <!-- tika-parsers 3.3.0 manages commons-io 2.17.0, which wins Maven mediation, but the
+                 commons-compress 1.28.0 it also pulls calls AbstractStreamBuilder.getInputStream(),
+                 which only became public in commons-io 2.18.0. With 2.17.0 (protected), Tika's
+                 GZipSpecializationDetector throws IllegalAccessError while detecting any gzip-ish
+                 attachment, aborting extraction of the whole containing PST/archive. Pin 2.18.0. -->
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>2.18.0</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Compile -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler.version}</version>
+                    <configuration>
+                        <compilerArgument>-Xlint:all</compilerArgument>
+                        <compilerArgument>-parameters</compilerArgument>
+                        <showDeprecation>true</showDeprecation>
+                    </configuration>
+                </plugin>
+
+                <!-- Tests -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${maven-surefire.version}</version>
+                    <configuration>
+                        <runOrder>random</runOrder>
+                        <argLine>-Djava.awt.headless=true -Duser.timezone=UTC</argLine>
+                        <systemPropertyVariables>
+                            <devenv.file>${devenv.file}</devenv.file>
+                        </systemPropertyVariables>
+                        <environmentVariables>
+                            <OMP_THREAD_LIMIT>1</OMP_THREAD_LIMIT>
+                            <OMP_WAIT_POLICY>passive</OMP_WAIT_POLICY>
+                        </environmentVariables>
+                    </configuration>
+                </plugin>
+
+                <!-- Jar -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>${maven-jar.version}</version>
+                    <configuration>
+                        <archive>
+                            <manifest>
+                                <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                                <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
+                            </manifest>
+                        </archive>
+                    </configuration>
+                </plugin>
+
+                <!-- Shade -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>${maven-shade.version}</version>
+                    <executions>
+                        <execution>
+                            <phase>package</phase>
+                            <goals>
+                                <goal>shade</goal>
+                            </goals>
+                            <configuration>
+                                <minimizeJar>false</minimizeJar>
+                                <filters>
+                                    <filter>
+                                        <artifact>*:*</artifact>
+                                        <excludes>
+                                            <exclude>META-INF/*.SF</exclude>
+                                            <exclude>META-INF/*.DSA</exclude>
+                                            <exclude>META-INF/*.RSA</exclude>
+                                            <exclude>META-INF/services/liquibase.logging.LogService</exclude>
+                                        </excludes>
+                                    </filter>
+                                </filters>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <plugin>
+                    <artifactId>maven-assembly-plugin</artifactId>
+                    <version>${maven-assembly.version}</version>
+                    <executions>
+                        <execution>
+                            <id>make-assembly</id>
+                            <phase>package</phase>
+                            <goals>
+                                <goal>single</goal>
+                            </goals>
+                            <configuration>
+                                <descriptorRefs>
+                                    <descriptorRef>jar-with-dependencies</descriptorRef>
+                                </descriptorRefs>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- Dependency -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-dependency-plugin</artifactId>
+                    <version>${maven-dependency.version}</version>
+                    <executions>
+                        <execution>
+                            <id>copy-installed</id>
+                            <phase>install</phase>
+                            <goals>
+                                <goal>copy</goal>
+                            </goals>
+                            <configuration>
+                                <artifactItems>
+                                    <artifactItem>
+                                        <groupId>${project.groupId}</groupId>
+                                        <artifactId>${project.artifactId}</artifactId>
+                                        <version>${project.version}</version>
+                                        <type>${project.packaging}</type>
+                                    </artifactItem>
+                                </artifactItems>
+                                <outputDirectory>
+                                    ${session.executionRootDirectory}/datashare-dist/target/datashare-dist-${project.version}-all/lib
+                                </outputDirectory>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- Source plugin -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>2.2.1</version>
+                    <executions>
+                        <execution>
+                            <id>attach-sources</id>
+                            <goals>
+                                <goal>jar-no-fork</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- Javadoc plugin -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <version>${maven-javadoc.version}</version>
+                    <configuration>
+                        <show>private</show>
+                        <nohelp>true</nohelp>
+                        <aggregate>true</aggregate>
+                        <reportOutputDirectory>${project.basedir}</reportOutputDirectory>
+                        <destDir>doc</destDir>
+                    </configuration>
+                    <!-- <executions>
+                        <execution>
+                            <id>attach-javadocs</id>
+                            <goals>
+                                <goal>jar</goal>
+                            </goals>
+                        </execution>
+                    </executions> -->
+                </plugin>
+
+                <!-- Install -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>${maven-install.version}</version>
+                </plugin>
+
+                <!-- Execute -->
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <version>${maven-exec.version}</version>
+                    <configuration>
+                        <systemProperties>
+                            <devenv.file>${devenv.file}</devenv.file>
+                        </systemProperties>
+                    </configuration>
+                </plugin>
+
+                <!-- Release -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-release-plugin</artifactId>
+                    <version>${maven-release.version}</version>
+                    <configuration>
+                        <autoVersionSubmodules>true</autoVersionSubmodules>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.sonatype.central</groupId>
+                    <artifactId>central-publishing-maven-plugin</artifactId>
+                    <version>0.7.0</version>
+                    <extensions>true</extensions>
+                    <configuration>
+                        <publishingServerId>central</publishingServerId>
+                        <autoPublish>true</autoPublish>
+                        <waitUntil>published</waitUntil>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>1.5</version>
+                    <executions>
+                        <execution>
+                            <id>sign-artifacts</id>
+                            <phase>verify</phase>
+                            <goals>
+                                <goal>sign</goal>
+                            </goals>
+                            <configuration>
+                                <!-- This is necessary for gpg to not try to use the pinentry programs -->
+                                <gpgArguments>
+                                    <arg>--pinentry-mode</arg>
+                                    <arg>loopback</arg>
+                                </gpgArguments>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+                <!-- <plugin>
+                    <groupId>io.github.git-commit-id</groupId>
+                    <artifactId>git-commit-id-maven-plugin</artifactId>
+                    <version>${git-commit-id-maven-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>get-the-git-infos</id>
+                            <goals>
+                                <goal>revision</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                    <configuration>
+                        <dotGitDirectory>${project.basedir}/.git</dotGitDirectory>
+                        <prefix>git</prefix>
+                        <verbose>false</verbose>
+                        <generateGitPropertiesFile>true</generateGitPropertiesFile>
+                        <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties
+                        </generateGitPropertiesFilename>
+                        <format>properties</format>
+                        <gitDescribe>
+                            <skip>false</skip>
+                            <always>false</always>
+                            <dirty>-dirty</dirty>
+                        </gitDescribe>
+                    </configuration>
+                </plugin> -->
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- plugins to sign and deploy datashare.pom (for standalone modules (ds-api, ds-cli, ds-tasks) -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

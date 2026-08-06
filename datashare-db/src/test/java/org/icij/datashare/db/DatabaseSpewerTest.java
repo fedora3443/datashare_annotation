@@ -1,0 +1,55 @@
+package org.icij.datashare.db;
+
+import org.icij.datashare.text.Document;
+import org.icij.datashare.text.Language;
+import org.icij.extract.document.TikaDocument;
+import org.icij.extract.extractor.Extractor;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.util.Collection;
+
+import static java.nio.charset.Charset.forName;
+import static java.util.Arrays.asList;
+import static java.util.Collections.singletonList;
+import static org.fest.assertions.Assertions.assertThat;
+import static org.icij.datashare.text.Project.project;
+
+@RunWith(Parameterized.class)
+public class DatabaseSpewerTest {
+    @Rule public DbSetupRule dbRule;
+    @Rule public TemporaryFolder tmp = new TemporaryFolder();
+    private final DatabaseSpewer dbSpewer;
+
+    @Parameterized.Parameters
+    public static Collection<Object[]> dataSources() {
+        return asList(new Object[][]{
+                {DbTestRuleProvider.getSqliteRule()},
+                {DbTestRuleProvider.getPostgresRule()}
+        });
+    }
+
+    public DatabaseSpewerTest(DbSetupRule rule) {
+        dbRule = rule;
+        dbSpewer = new DatabaseSpewer(project("prj"), rule.createRepository(), text -> Language.ENGLISH);
+    }
+
+    @Test
+    public void test_spew_document_iso8859_encoded_is_stored_in_utf8_and_have_correct_parameters() throws Exception {
+        File file = tmp.newFile("test_iso8859-1.txt");
+        Files.write(file.toPath(), singletonList("chaîne en iso8859"), forName("ISO-8859-1"));
+        TikaDocument tikaDocument = new Extractor().extract(file.toPath());
+
+        dbSpewer.write(tikaDocument);
+        Document actual = dbSpewer.repository.getDocument(tikaDocument.getId());
+        assertThat(actual.getContent()).isEqualTo("chaîne en iso8859");
+        assertThat(actual.getContentEncoding()).isEqualTo(forName("iso8859-1"));
+        assertThat(actual.getContentLength()).isEqualTo(18);
+        assertThat(actual.getContentType()).isEqualTo("text/plain");
+    }
+}

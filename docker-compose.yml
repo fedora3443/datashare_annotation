@@ -1,0 +1,37 @@
+services:
+    amqp:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: amqp
+
+    s3mock:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: s3mock
+
+    redis:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: redis
+
+    postgres:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: postgres
+      volumes:
+        - ./.devcontainer/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+    elasticsearch:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: elasticsearch
+
+    temporal:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: temporal
+
+    temporal-ui:
+      extends:
+        file: .devcontainer/docker-compose.yml
+        service: temporal-ui

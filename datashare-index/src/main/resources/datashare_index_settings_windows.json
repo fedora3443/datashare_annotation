@@ -1,0 +1,63 @@
+{
+  "index.mapping.total_fields.limit": 100000,
+  "index.number_of_shards" : 1,
+  "index.query.default_field": [
+    "content",
+    "mentionNorm",
+    "content_translated.content",
+    "metadata.tika_metadata_author",
+    "metadata.tika_metadata_creator",
+    "metadata.tika_metadata_dc_creator",
+    "metadata.tika_metadata_dc_title",
+    "metadata.tika_metadata_message_from",
+    "metadata.tika_metadata_message_to",
+    "metadata.tika_metadata_meta_author",
+    "metadata.tika_metadata_subject",
+    "metadata.tika_metadata_title",
+    "metadata.tika_metadata_resourcename",
+    "name",
+    "path",
+    "path.parts",
+    "tags"
+  ],
+  "analysis": {
+    "analyzer": {
+      "path_analyzer": {
+        "type":"custom",
+        "tokenizer": "path_tokenizer"
+      },
+      "path_parts_analyzer": {
+        "type":"custom",
+        "tokenizer": "path_parts_tokenizer",
+        "filter": ["lowercase"]
+      },
+      "folding": {
+        "type":"custom",
+        "tokenizer": "standard",
+        "filter":  [ "lowercase", "asciifolding" ]
+      }
+    },
+    "tokenizer": {
+      "path_tokenizer": {
+        "type": "path_hierarchy",
+        "delimiter": "\\",
+        "replacement": "\\",
+        "buffer_size": 1024,
+        "reverse": false,
+        "skip": 0
+      },
+      "path_parts_tokenizer": {
+        "type": "pattern",
+        "pattern": "[/\\\\. ]+",
+        "flags": "",
+        "group": -1
+      }
+    },
+    "normalizer": {
+      "keyword_lowercase": {
+        "type": "custom",
+        "filter": ["lowercase"]
+      }
+    }
+  }
+}

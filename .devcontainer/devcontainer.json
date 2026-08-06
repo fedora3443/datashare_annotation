@@ -1,0 +1,72 @@
+{
+  "name": "Datashare Dev Environment",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/workspace/datashare,type=bind",
+  "workspaceFolder": "/home/dev/workspace/datashare",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "vscjava.vscode-maven",
+        "redhat.java",
+        "vscjava.vscode-java-debug",
+        "vscjava.vscode-java-test",
+        "vscjava.vscode-java-dependency",
+        "vmware.vscode-boot-dev-pack",
+        "gabrielbb.vscode-lombok"
+      ],
+      "settings": {
+        "java.configuration.runtimes": [
+          {
+            "name": "JavaSE-17",
+            "path": "/usr/lib/jvm/java-17-openjdk",
+            "default": true
+          }
+        ],
+        "java.jdt.ls.java.home": "/usr/lib/jvm/java-17-openjdk",
+        "maven.executable.path": "/usr/bin/mvn",
+        "java.compile.nullAnalysis.mode": "automatic",
+        "java.test.config": [
+          {
+            "name": "with-add-opens",
+            "vmArgs": [
+              "-Djava.system.class.loader=org.icij.datashare.DynamicClassLoader",
+              "-ea",
+              "--add-opens=java.base/java.lang=ALL-UNNAMED",
+              "--add-opens=java.base/sun.nio.cs=ALL-UNNAMED",
+              "--add-opens=java.base/java.util=ALL-UNNAMED",
+              "--add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED"
+            ]
+          }
+        ],
+        "java.test.defaultConfig": "with-add-opens"
+      }
+    }
+  },
+
+  "portsAttributes": {
+    "8888": {
+      "label": "Datashare (mapped from 8080)",
+      "onAutoForward": "notify"
+    },
+    "5432": {
+      "label": "PostgreSQL"
+    },
+    "9200": {
+      "label": "Elasticsearch"
+    },
+    "9736": {
+      "label": "Redis"
+    },
+    "15672": {
+      "label": "LavinMQ Management"
+    }
+  },
+
+  "postCreateCommand": "mvn validate",
+  
+  "remoteUser": "dev",
+  "updateRemoteUserUID": true
+}

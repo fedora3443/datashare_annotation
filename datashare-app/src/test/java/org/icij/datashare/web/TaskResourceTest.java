@@ -1,0 +1,1056 @@
+package org.icij.datashare.web;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import net.codestory.http.*;
+import net.codestory.http.errors.BadRequestException;
+import net.codestory.http.filters.basic.BasicAuthFilter;
+import net.codestory.rest.Response;
+import net.codestory.rest.RestAssert;
+import net.codestory.rest.ShouldChain;
+import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.asynctasks.TaskFilters;
+import org.icij.datashare.asynctasks.TaskManagerMemory;
+import org.icij.datashare.asynctasks.TaskRepositoryMemory;
+import org.icij.datashare.asynctasks.bus.amqp.TaskCreation;
+import org.icij.datashare.batch.BatchSearchRecord;
+import org.icij.datashare.batch.BatchSearchRepository;
+import org.icij.datashare.cli.Mode;
+import org.icij.datashare.db.JooqRepository;
+import org.icij.datashare.extension.PipelineRegistry;
+import org.icij.datashare.json.JsonObjectMapper;
+import org.icij.datashare.nlp.EmailPipeline;
+import org.icij.datashare.policies.*;
+import org.icij.datashare.session.DatashareUser;
+import org.icij.datashare.session.LocalUserFilter;
+import net.codestory.http.security.Users;
+import org.icij.datashare.tasks.*;
+import org.icij.datashare.test.DatashareTimeRule;
+import org.icij.datashare.text.Project;
+import org.icij.datashare.text.ProjectProxy;
+import org.icij.datashare.text.nlp.AbstractModels;
+import org.icij.datashare.user.User;
+import org.icij.datashare.web.testhelpers.AbstractProdWebServerTest;
+import org.jetbrains.annotations.NotNull;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.mockito.Mock;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.CountDownLatch;
+
+import static java.lang.String.format;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.fest.assertions.Assertions.assertThat;
+import static org.fest.assertions.MapAssert.entry;
+import static org.icij.datashare.PropertiesProvider.DATA_DIR_OPT;
+import static org.icij.datashare.PropertiesProvider.REPORT_NAME_OPT;
+import static org.icij.datashare.asynctasks.Task.State.RUNNING;
+import static org.icij.datashare.cli.DatashareCliOptions.TASK_MANAGER_POLLING_INTERVAL_OPT;
+import static org.icij.datashare.session.DatashareUser.singleUser;
+import static org.icij.datashare.text.Project.project;
+import static org.icij.datashare.user.User.local;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+import static org.mockito.MockitoAnnotations.openMocks;
+
+public class TaskResourceTest extends AbstractProdWebServerTest {
+    @Rule
+    public DatashareTimeRule time = new DatashareTimeRule("2021-07-07T12:23:34Z");
+    @Mock
+    JooqRepository jooqRepository;
+    @Mock
+    BatchSearchRepository batchSearchRepository;
+
+    private static final TestTaskUtils.DatashareTaskFactoryForTest taskFactory = mock(TestTaskUtils.DatashareTaskFactoryForTest.class);
+    private static final TaskRepositoryMemory taskRepository = new TaskRepositoryMemory();
+    private static final TaskManagerMemory taskManager = new TaskManagerMemory(taskFactory, taskRepository, new PropertiesProvider(Map.of(TASK_MANAGER_POLLING_INTERVAL_OPT, "500")), new CountDownLatch(1));
+
+    private static AutoCloseable mocks;
+    private TaskFinder taskFinder;
+    Authorizer authorizer;
+    @Mock
+    CasbinRuleAdapter adapter;
+    @Mock
+    Users users;
+
+    @Before
+    public void setUp() {
+        mocks = openMocks(this);
+        this.taskFinder = new TaskFinder(taskManager, batchSearchRepository);
+        when(jooqRepository.getProjects()).thenReturn(new ArrayList<>());
+        when(batchSearchRepository.getRecords(any(), any())).thenReturn(new ArrayList<>());
+        PipelineRegistry pipelineRegistry = new PipelineRegistry(getDefaultPropertiesProvider());
+        pipelineRegistry.register(EmailPipeline.class);
+        LocalUserFilter localUserFilter = new LocalUserFilter(getDefaultPropertiesProvider(), jooqRepository);
+        configure(routes -> routes
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(localUserFilter)
+        );
+        TestTaskUtils.init(taskFactory);
+    }
+
+    @After
+    public void tearDown() throws Exception {
+        taskManager.stopTasks(new TaskFilters());
+        taskManager.awaitTermination(2, SECONDS);
+        taskManager.clear();
+        taskRepository.clear();
+        mocks.close();
+    }
+
+    @Test
+    public void test_get_task_with_different_user() throws IOException {
+        String taskIdOfOtherUser = taskManager.startTask(TestSleepingTask.class, User.localUser("differentUser"), new HashMap<>());
+        taskManager.stopTask(taskIdOfOtherUser);
+        // The test setup will make the request come from local user different from "differentUser"
+        get("/api/task/"+taskIdOfOtherUser).should().respond(403);
+    }
+
+    @Test
+    public void test_get_task_for_published_batch_search_owned_by_different_user() {
+        BatchSearchRecord publishedRecord = new BatchSearchRecord(
+                UUID.randomUUID().toString(), List.of("project"), "name", "description",
+                123, 123, new Date(), BatchSearchRecord.State.SUCCESS, "/",
+                User.localUser("differentUser"), 0, true, null, null);
+        when(batchSearchRepository.getRecords(any(), any())).thenReturn(List.of(publishedRecord));
+        get("/api/task/" + publishedRecord.uuid).should().respond(200);
+    }
+
+    @Test
+    public void test_get_task_result_with_different_user() throws IOException {
+        String taskIdOfOtherUser = taskManager.startTask(TestSleepingTask.class, User.localUser("differentUser"), new HashMap<>());
+        taskManager.stopTask(taskIdOfOtherUser);
+        get("/api/task/" + taskIdOfOtherUser + "/result").should().respond(403);
+    }
+
+    @Test
+    public void test_get_task_result_for_published_batch_search_owned_by_different_user() {
+        BatchSearchRecord publishedRecord = new BatchSearchRecord(
+                UUID.randomUUID().toString(), List.of("project"), "name", "description",
+                123, 123, new Date(), BatchSearchRecord.State.SUCCESS, "/",
+                User.localUser("differentUser"), 0, true, null, null);
+        when(batchSearchRepository.getRecords(any(), any())).thenReturn(List.of(publishedRecord));
+        get("/api/task/" + publishedRecord.uuid + "/result").should().respond(200);
+    }
+
+    @Test
+    public void test_get_tasks_with_correct_id() throws IOException {
+        String dummyTaskId = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        get("/api/task").should()
+                .respond(200)
+                .contain("\"id\":\"" + dummyTaskId + "\"")
+                .contain("\"state\":\"RUNNING\"");
+        put("/api/task/stop/" + dummyTaskId).should()
+                .respond(200)
+                .contain("true");
+        get("/api/task").should()
+                .respond(200)
+                .contain("\"id\":\"" + dummyTaskId + "\"")
+                .contain("\"state\":\"CANCELLED\"");
+    }
+
+    @Test
+    public void test_get_tasks() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+
+        get("/api/task?args.dataDir=docs").should().contain("ScanTask").not().contain("IndexTask");
+        get("/api/task").should().haveType("application/json").contain("IndexTask").contain("ScanTask");
+        get("/api/task?name=Index").should().contain("IndexTask").not().contain("ScanTask");
+    }
+
+    @Test
+    public void test_get_tasks_filtered_on_multiple_names_or_type() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+
+        get("/api/task").should().haveType("application/json").contain("IndexTask").contain("ScanTask");
+        get("/api/task?name=scan|index").should().contain("ScanTask").contain("IndexTask");
+        get("/api/task?type=scan|index").should().contain("ScanTask").contain("IndexTask");
+    }
+
+    @Test
+    public void test_get_tasks_with_unknown_type() {
+        get("/api/task?type=foo").should().respond(400).haveType("application/json").contain("TaskType.FOO");
+    }
+
+    @Test
+    public void test_get_tasks_including_batch_search_runner_proxy() {
+        List<ProjectProxy> projects = List.of(project("project"));
+        BatchSearchRecord batchSearchRecord = new BatchSearchRecord(projects, "name", "description", 123, new Date(), "/");
+
+        when(batchSearchRepository.getRecords(any(), any())).thenReturn(List.of(batchSearchRecord));
+
+        get("/api/task").should().contain("BatchSearchRunnerProxy");
+    }
+
+    @Test
+    public void test_get_tasks_including_filtered_batch_search_runner_proxy() {
+        List<ProjectProxy> projects = List.of(project("project"));
+        BatchSearchRecord batchSearchRecord = new BatchSearchRecord(projects, "foo", "bar", 123, new Date(), "/");
+
+        when(batchSearchRepository.getRecords(any(), any())).thenReturn(List.of(batchSearchRecord));
+
+        get("/api/task").should().contain("BatchSearchRunnerProxy");
+        get("/api/task?args.batchRecord.name=foo").should().contain("BatchSearchRunnerProxy");
+        get("/api/task?args.batchRecord.name=oo").should().contain("BatchSearchRunnerProxy");
+    }
+
+    @Test
+    public void test_get_tasks_paginated_with_zero_tasks() {
+        get("/api/task?size=10").should().haveType("application/json")
+                .contain("\"count\":0")
+                .contain("\"total\":0")
+                .contain("\"from\":0")
+                .contain("\"size\":10");
+    }
+
+    @Test
+    public void test_get_tasks_paginated_with_two_tasks() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+
+        get("/api/task?size=4").should().haveType("application/json")
+                .contain("\"count\":2")
+                .contain("\"total\":2")
+                .contain("\"from\":0")
+                .contain("\"size\":4");
+    }
+
+    @Test
+    public void test_get_tasks_paginated_with_four_tasks_from_first_page() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+
+        get("/api/task?size=2").should().haveType("application/json")
+                .contain("\"count\":2")
+                .contain("\"total\":4")
+                .contain("\"from\":0")
+                .contain("\"size\":2");
+    }
+
+    @Test
+    public void test_get_tasks_paginated_with_four_tasks_from_second_page() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+        post("/api/task/batchUpdate/index/" + subpath, body).should().haveType("application/json");
+
+        get("/api/task?size=2&from=2").should().haveType("application/json")
+                .contain("\"count\":2")
+                .contain("\"total\":4")
+                .contain("\"from\":2")
+                .contain("\"size\":2");
+    }
+
+    @Test
+    public void test_get_tasks_filter() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String bodyFoo = "{\"options\":{\"defaultProject\": \"foo\"}}";
+        String bodyBar = "{\"options\":{\"defaultProject\": \"bar\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, bodyFoo).should().haveType("application/json");
+        post("/api/task/batchUpdate/index/" + subpath, bodyBar).should().haveType("application/json");
+
+        get("/api/task?size=1").should().contain("\"count\":1").contain("\"total\":4");
+        get("/api/task?size=1&args.defaultProject=foo").should().contain("\"count\":1").contain("\"total\":2");
+        get("/api/task?size=1&args.defaultProject=bar").should().contain("\"count\":1").contain("\"total\":2");
+        get("/api/task?size=1&args.defaultProject=ice").should().contain("\"count\":0").contain("\"total\":0");
+    }
+
+    @Test
+    public void test_get_tasks_filter_case_insensitive() {
+        String subpath = getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        String bodyFoo = "{\"options\":{\"defaultProject\": \"foo\"}}";
+        String bodyBar = "{\"options\":{\"defaultProject\": \"bar\"}}";
+        post("/api/task/batchUpdate/index/" + subpath, bodyFoo).should().haveType("application/json");
+        post("/api/task/batchUpdate/index/" + subpath, bodyBar).should().haveType("application/json");
+
+        get("/api/task?size=1").should().contain("\"count\":1").contain("\"total\":4");
+        get("/api/task?size=1&args.defaultProject=FOO")
+                .should()
+                .contain("\"count\":1")
+                .contain("\"total\":2")
+                .contain("\"defaultProject\":\"foo\"");
+    }
+
+    @Test
+    public void test_get_all_tasks_filter() {
+        post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1),
+                "{\"options\":{\"reportName\": \"foo\"}}").should().haveType("application/json");
+
+        get("/api/task/all").should().haveType("application/json").contain("IndexTask").contain("ScanTask");
+        get("/api/task/all?name=Index").should().contain("IndexTask").not().contain("ScanTask");
+        get("/api/task/all?args.dataDir=docs").should().contain("ScanTask").not().contain("IndexTask");
+    }
+
+    @Test
+    public void test_get_all_tasks_paginated() throws Exception {
+        post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1),
+                "{\"options\":{\"reportName\": \"foo1\"}}").should().haveType("application/json");
+        post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/embedded_doc.eml").getPath().substring(1),
+                "{\"options\":{\"reportName\": \"foo2\"}}").should().haveType("application/json");
+
+        List<Map<String, Object>> jsonTasks = JsonObjectMapper.readValue(get("/api/task/all").response().content(), new TypeReference<>() {});
+        assertThat(jsonTasks).hasSize(4);
+
+        List<Map<String, Object>> twoFirst = JsonObjectMapper.readValue(get("/api/task/all?size=2").response().content(), new TypeReference<>() {});
+        assertThat(twoFirst).hasSize(2);
+        List<Map<String, Object>> twoLast = JsonObjectMapper.readValue(get("/api/task/all?size=2&from=2").response().content(), new TypeReference<>() {});
+        assertThat(twoLast).hasSize(2);
+        assertThat(twoFirst).isNotEqualTo(twoLast);
+    }
+
+    @Test
+    public void test_get_all_tasks_sorted() throws Exception {
+        post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1),
+                "{\"options\":{\"reportName\": \"foo\"}}").should().haveType("application/json");
+        assertThat(JsonObjectMapper.readValue(get("/api/task/all").response().content(), new TypeReference<List<Map<String, Object>>>() {}).stream()
+                .map(t -> t.get("name")).toList()).isEqualTo(List.of("org.icij.datashare.tasks.IndexTask", "org.icij.datashare.tasks.ScanTask"));
+        assertThat(JsonObjectMapper.readValue(get("/api/task/all?order=desc").response().content(), new TypeReference<List<Map<String, Object>>>() {}).stream()
+                .map(t -> t.get("name")).toList()).isEqualTo(List.of("org.icij.datashare.tasks.ScanTask", "org.icij.datashare.tasks.IndexTask"));
+    }
+
+    @Test
+    public void test_index_file() throws IOException {
+        RestAssert response = post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), "{}");
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(format(taskNames.get(0)));
+        responseBody.should().contain(taskNames.get(1));
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).excludes(entry("reportName", "extract:report:map"));
+    }
+
+    @Test
+    public void test_index_file_with_post_option() throws IOException {
+        String path = getClass().getResource("/docs/doc.txt").getPath();
+        String body = String.format("{ \"options\":{\"path\": \"%s\"}} }", path);
+        RestAssert response = post("/api/task/batchUpdate/index", body);
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(format(taskNames.get(0)));
+        responseBody.should().contain(taskNames.get(1));
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).excludes(entry("reportName", "extract:report:map"));
+    }
+
+    @Test
+    public void test_index_file_forbidden_in_server_mode() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(Map.of("mode", Mode.SERVER.name()));
+            TaskResource taskResource = new TaskResource(taskFactory, taskManager, propertiesProvider, batchSearchRepository, taskFinder);
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", singleUser(local()));
+            routes.filter(basicAuthFilter).add(taskResource);
+        });
+
+        String path = "/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1);
+        RestAssert response = post(path, "{}").withPreemptiveAuthentication("local", "pass");
+        response.should().respond(403);
+    }
+
+    @Test
+    public void test_index_forbidden_in_server_mode() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(Map.of("mode", Mode.SERVER.name()));
+            TaskResource taskResource = new TaskResource(taskFactory, taskManager, propertiesProvider, batchSearchRepository, taskFinder);
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", singleUser(local()));
+            routes.filter(basicAuthFilter).add(taskResource);
+        });
+
+        String path = "/api/task/batchUpdate/index";
+        RestAssert response = post(path, "{}").withPreemptiveAuthentication("local", "pass");
+        response.should().respond(403);
+    }
+
+
+    @Test
+    public void test_index_file_without_filter_should_not_pass_report_map_to_task() throws IOException {
+        String body = "{\"options\":{\"reportName\": \"foo\"}}";
+        post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), body).should().haveType("application/json");
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).excludes(entry("reportName", "foo"));
+    }
+
+    @Test
+    public void test_index_file_and_filter() throws IOException {
+        String body = "{\"options\":{\"filter\": true}}";
+        RestAssert response = post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), body);
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(taskNames.get(0));
+        responseBody.should().contain(taskNames.get(1));
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).includes(entry("reportName", "extract:report:local-datashare"));
+    }
+
+    @Test
+    public void test_index_file_and_filter_with_custom_report_map() throws IOException {
+        String body = "{\"options\":{\"filter\": true, \"defaultProject\": \"foo\"}}";
+        RestAssert response = post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), body);
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(taskNames.get(0));
+        responseBody.should().contain(taskNames.get(1));
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).includes(entry("reportName", "extract:report:foo"));
+    }
+
+    @Test
+    public void test_index_file_and_filter_with_custom_queue() throws IOException {
+        String body = "{\"options\":{\"filter\": true, \"defaultProject\": \"foo\"}}";
+        RestAssert response = post("/api/task/batchUpdate/index/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), body);
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(taskNames.get(0));
+        responseBody.should().contain(taskNames.get(1));
+    }
+
+    @Test
+    public void test_index_directory() throws IOException {
+        RestAssert response = post("/api/task/batchUpdate/index/file/" + getClass().getResource("/docs/").getPath().substring(1), "{}");
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        responseBody.should().contain(taskNames.get(0));
+        responseBody.should().contain(taskNames.get(1));
+    }
+
+    @Test(timeout = 2000)
+    public void test_index_and_scan_default_directory() throws IOException {
+        RestAssert response = post("/api/task/batchUpdate/index/file", "{}");
+        Map<String, Object> properties = getDefaultProperties();
+        properties.put("foo", "bar");
+
+        response.should().respond(200).haveType("application/json");
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args).
+                includes(entry("dataDir", "/default/data/dir"));
+    }
+
+    @Test
+    public void test_index_and_scan_directory_with_options() throws IOException {
+        String path = Objects.requireNonNull(getClass().getResource("/docs")).getPath();
+        String filePath = path.substring(1);
+        String body = "{\"options\":{\"foo\":\"baz\",\"key\":\"val\"}}";
+        RestAssert response = post("/api/task/batchUpdate/index/" + filePath, body);
+
+        response.should().haveType("application/json");
+        Map<String, Object> defaultProperties = getDefaultProperties();
+        defaultProperties.put("foo", "baz");
+        defaultProperties.put("key", "val");
+        defaultProperties.put("user", User.local());
+        defaultProperties.remove(REPORT_NAME_OPT);
+
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args.get(DATA_DIR_OPT)).isEqualTo(path);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).isEqualTo(defaultProperties);
+    }
+
+    @Test
+    public void test_index_and_scan_directory_with_options_including_filepath() throws IOException {
+        String path = Objects.requireNonNull(getClass().getResource("/docs")).getPath();
+        String body = String.format("{\"options\":{\"foo\":\"baz\",\"path\":\"%s\"}}", path);
+        RestAssert response = post("/api/task/batchUpdate/index", body);
+
+        response.should().haveType("application/json");
+        Map<String, Object> defaultProperties = getDefaultProperties();
+        defaultProperties.put("foo", "baz");
+        defaultProperties.put("path", path);
+        defaultProperties.put("user", User.local());
+        defaultProperties.remove(REPORT_NAME_OPT);
+
+        assertThat(taskManager.getTasks().toList()).hasSize(2);
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args.get(DATA_DIR_OPT)).isEqualTo(path);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask").get().args).isEqualTo(defaultProperties);
+    }
+
+    @Test
+    public void test_index_queue_with_options() throws IOException {
+        String body = "{\"options\":{\"key1\":\"val1\",\"key2\":\"val2\"}}";
+        RestAssert response = post("/api/task/batchUpdate/index", body);
+        response.should().haveType("application/json");
+
+        Map<String, Object> defaultProperties = getDefaultProperties();
+        defaultProperties.put("key1", "val1");
+        defaultProperties.put("key2", "val2");
+        defaultProperties.put("user", User.local());
+
+        List<Task<?>> tasks = taskManager.getTasks().toList();
+        assertThat(tasks).hasSize(1);
+        assertThat(tasks.get(0).name).isEqualTo("org.icij.datashare.tasks.IndexTask");
+
+        assertThat(tasks.get(0).args).isEqualTo(defaultProperties);
+    }
+
+    @Test
+    public void test_scan_with_options() throws IOException {
+        String path = getClass().getResource("/docs").getPath();
+        RestAssert response = post("/api/task/batchUpdate/scan/" + path.substring(1),
+                "{\"options\":{\"key\":\"val\",\"foo\":\"qux\"}}");
+
+        ShouldChain responseBody = response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        assertThat(taskNames.size()).isEqualTo(1);
+        responseBody.should().contain(taskNames.get(0));
+        Map<String, Object> defaultProperties = getDefaultProperties();
+        defaultProperties.put("key", "val");
+        defaultProperties.put("foo", "qux");
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args).
+                includes(entry("key", "val"), entry("foo", "qux"), entry(DATA_DIR_OPT, path));
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.IndexTask")).isNotNull();
+    }
+
+    @Test
+    public void test_scan_forbidden_in_server_mode() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(Map.of("mode", Mode.SERVER.name()));
+            TaskResource taskResource = new TaskResource(taskFactory, taskManager, propertiesProvider, batchSearchRepository, taskFinder);
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", singleUser(local()));
+            routes.filter(basicAuthFilter).add(taskResource);
+        });
+
+        String path = "/api/task/batchUpdate/scan/" + getClass().getResource("/docs").getPath().substring(1);
+        RestAssert response = post(path, "{}").withPreemptiveAuthentication("local", "pass");
+        response.should().respond(403);
+    }
+
+    @Test
+    public void test_scan_queue_is_created_correctly() throws IOException {
+        String body = "{\"options\":{\"filter\": true, \"defaultProject\": \"foo\"}}";
+        String path = Objects.requireNonNull(getClass().getResource("/docs/")).getPath();
+        RestAssert response = post("/api/task/batchUpdate/scan/" + path.substring(1), body);
+        response.should().haveType("application/json");
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args).
+                includes(entry("queueName", "extract:queue:foo:1725215461"));
+    }
+
+    @Test
+    public void test_digest_project_name_is_created_correctly() throws IOException {
+        String body = "{\"options\":{\"filter\": true, \"defaultProject\": \"foo\"}}";
+        String path = Objects.requireNonNull(getClass().getResource("/docs/")).getPath();
+        RestAssert response = post("/api/task/batchUpdate/scan/" + path.substring(1), body);
+        response.should().haveType("application/json");
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args).
+                includes(entry("digestProjectName", "foo"));
+    }
+
+    @Test
+    public void test_scan_queue_is_created_correctly_and_options_ignored() throws IOException {
+        String body = "{\"options\":{\"filter\": true, \"defaultProject\": \"foo\", \"queueName\": \"bar\"}}";
+        String path = Objects.requireNonNull(getClass().getResource("/docs/")).getPath();
+        RestAssert response = post("/api/task/batchUpdate/scan/" + path.substring(1), body);
+        response.should().haveType("application/json");
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ScanTask").get().args).
+                includes(entry("queueName", "extract:queue:foo:1725215461"));
+    }
+
+    @Test
+    public void test_findNames_should_create_resume() throws IOException {
+        RestAssert response = post("/api/task/findNames/EMAIL", "{\"options\":{\"waitForNlpApp\": false}}");
+
+        response.should().haveType("application/json");
+
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+        assertThat(taskNames.size()).isEqualTo(2);
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.EnqueueFromIndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ExtractNlpTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ExtractNlpTask").get().args).includes(entry("nlpPipeline", "EMAIL"));
+    }
+
+    @Test
+    public void test_findNames_forbidden_in_server_mode() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(Map.of("mode", Mode.SERVER.name()));
+            TaskResource taskResource = new TaskResource(taskFactory, taskManager, propertiesProvider, batchSearchRepository, taskFinder);
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", singleUser(local()));
+            routes.filter(basicAuthFilter).add(taskResource);
+        });
+
+        RestAssert response = post("/api/task/findNames/EMAIL", "{}")
+                .withPreemptiveAuthentication("local", "pass");
+        response.should().respond(403);
+    }
+
+    @Test
+    public void test_findNames_with_options_should_merge_with_property_provider() throws IOException {
+        RestAssert response = post("/api/task/findNames/EMAIL", "{\"options\":{\"waitForNlpApp\": false, \"key\":\"val\",\"foo\":\"loo\"}}");
+        response.should().haveType("application/json");
+
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.EnqueueFromIndexTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ExtractNlpTask")).isNotNull();
+        assertThat(findTask(taskManager, "org.icij.datashare.tasks.ExtractNlpTask").get().args).
+                includes(
+                        entry("nlpPipeline", "EMAIL"),
+                        entry("key", "val"),
+                        entry("foo", "loo"));
+    }
+
+    @Test
+    public void test_findNames_with_resume_false_should_not_launch_resume_task() {
+        RestAssert response = post("/api/task/findNames/EMAIL", "{\"options\":{\"resume\":\"false\", \"waitForNlpApp\": false}}");
+        response.should().haveType("application/json");
+
+        verify(taskFactory, never()).createEnqueueFromIndexTask(eq(null), any());
+    }
+
+    @Test
+    public void test_findNames_with_sync_models_false() {
+        AbstractModels.syncModels(true);
+        RestAssert response = post("/api/task/findNames/EMAIL", "{\"options\":{\"syncModels\":\"false\", \"waitForNlpApp\": false}}");
+        response.should().haveType("application/json");
+
+        assertThat(AbstractModels.isSync()).isFalse();
+    }
+
+    @Test
+    public void test_batch_download() throws Exception {
+        Response response = post("/api/task/batchDownload", "{\"options\":{ \"projectIds\":[\"test-datashare\"], \"query\": \"*\" }}").response();
+
+        assertThat(response.contentType()).startsWith("application/json");
+        TaskResource.TaskResponse taskResponse = JsonObjectMapper.readValue(response.content(), TaskResource.TaskResponse.class);
+        assertThat(taskManager.getTask(taskResponse.taskId())).isNotNull();
+    }
+
+    @Test
+    public void test_batch_download_multiple_projects() throws Exception {
+        Response response = post("/api/task/batchDownload", "{\"options\":{ \"projectIds\":[\"project1\", \"project2\"], \"query\": \"*\" }}").response();
+
+        assertThat(response.contentType()).startsWith("application/json");
+        TaskResource.TaskResponse taskResponse = JsonObjectMapper.readValue(response.content(), TaskResource.TaskResponse.class);
+        assertThat(taskManager.getTask(taskResponse.taskId())).isNotNull();
+    }
+
+    @Test
+    public void test_batch_download_uri() throws Exception {
+        Response response = post("/api/task/batchDownload", "{\"options\":{ \"projectIds\":[\"test-datashare\"], \"query\": \"*\", \"uri\": \"/an%20url-encoded%20uri\" }}").response();
+
+        assertThat(response.contentType()).startsWith("application/json");
+        TaskResource.TaskResponse taskResponse = JsonObjectMapper.readValue(response.content(), TaskResource.TaskResponse.class);
+        assertThat(taskManager.getTask(taskResponse.taskId())).isNotNull();
+    }
+
+    @Test
+    public void test_batch_download_json_query()  throws Exception {
+        Response response = post("/api/task/batchDownload", "{\"options\":{ \"projectIds\":[\"test-datashare\"], \"query\": {\"match_all\":{}} }}").response();
+
+        assertThat(response.contentType()).startsWith("application/json");
+        TaskResource.TaskResponse taskResponse = JsonObjectMapper.readValue(response.content(), TaskResource.TaskResponse.class);
+        assertThat(taskManager.getTask(taskResponse.taskId())).isNotNull();
+    }
+
+    @Test
+    public void test_clean_tasks() throws IOException {
+        post("/api/task/batchUpdate/index/file/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), "{}").response();
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        List<String> taskNames = taskManager.getTasks().map(t -> t.id).toList();
+
+        ShouldChain responseBody = post("/api/task/clean", "{}").should().haveType("application/json");
+
+        responseBody.should().contain(taskNames.get(0));
+        responseBody.should().contain(taskNames.get(1));
+        assertThat(taskManager.getTasks().findAny());
+    }
+
+    @Test
+    public void test_clean_tasks_done_only() throws IOException {
+        String runningTask = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        String stoppedTask = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+
+        taskManager.stopTask(stoppedTask);
+
+        post("/api/task/clean", "{}").should().haveType("application/json");
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+        assertThat(taskManager.getTasks().map(Task::getId).map(String::new).toList().contains(runningTask)).isTrue();
+    }
+
+    @Test
+    public void test_clean_task_filter() throws IOException, InterruptedException {
+        //Will create one Scan and one Index Task
+        post("/api/task/batchUpdate/index/file/" + getClass().getResource("/docs/doc.txt").getPath().substring(1), "{}").response();
+        awaitTasksExist(2, 2000, 100);
+
+        ShouldChain responseBody = post("/api/task/clean?name=Scan", "{}").should().haveType("application/json");
+
+        responseBody.should().contain("ScanTask");
+        responseBody.should().not().contain("IndexTask");
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+    }
+
+
+    @Test
+    public void test_clean_task_with_admin_policy() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+        DatashareUser notJohn = new DatashareUser("notJohn");
+
+        String dummyTaskId = taskManager.startTask(TestTask.class, notJohn, new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        // Setup user
+        DatashareUser john = new DatashareUser("john");
+        john.addProject(projectId);
+        authorizer.addRoleForUserInProject(john, Role.PROJECT_MEMBER, Domain.DEFAULT, project);
+        when(users.find(john.id)).thenReturn(john);
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("john", "notJohn")))
+        );
+
+        // MEMBER cannot clean
+        delete("/api/task/clean/" + dummyTaskId).withPreemptiveAuthentication("john", "").should().respond(403);
+        authorizer.updateRoleForUserInProject(john, Role.PROJECT_ADMIN, Domain.DEFAULT, project);
+        delete("/api/task/clean/" + dummyTaskId).withPreemptiveAuthentication("john", "").should().respond(200);
+    }
+
+    @Test
+    public void test_clean_task_as_owner() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+        DatashareUser owner = new DatashareUser("owner");
+        owner.addProject(projectId);
+        authorizer.addRoleForUserInProject(owner, Role.PROJECT_MEMBER, Domain.DEFAULT, project);
+        when(users.find(owner.id)).thenReturn(owner);
+
+        String dummyTaskId = taskManager.startTask(TestTask.class, owner, new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("owner")))
+        );
+
+        // MEMBER cannot clean but as owner it's ok
+        delete("/api/task/clean/" + dummyTaskId).withPreemptiveAuthentication("owner", "").should().respond(200);
+    }
+
+    @Test
+    public void test_stop_task_with_admin_policy() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+        DatashareUser notJohn = new DatashareUser("notJohn");
+
+        String dummyTaskId = taskManager.startTask(TestSleepingTask.class, notJohn, new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+
+        DatashareUser john = new DatashareUser("john");
+        john.addProject(projectId);
+        authorizer.addRoleForUserInProject(john, Role.PROJECT_MEMBER, Domain.DEFAULT, project);
+        when(users.find(john.id)).thenReturn(john);
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("john", "notJohn")))
+        );
+
+        // MEMBER cannot stop a task created by someone else
+        put("/api/task/stop/" + dummyTaskId).withPreemptiveAuthentication("john", "").should().respond(403);
+        authorizer.updateRoleForUserInProject(john, Role.PROJECT_ADMIN, Domain.DEFAULT, project);
+        put("/api/task/stop/" + dummyTaskId).withPreemptiveAuthentication("john", "").should().respond(200);
+    }
+
+    @Test
+    public void test_stop_task_as_owner() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+        DatashareUser owner = new DatashareUser("owner");
+        owner.addProject(projectId);
+        authorizer.addRoleForUserInProject(owner, Role.PROJECT_MEMBER, Domain.DEFAULT, project);
+        when(users.find(owner.id)).thenReturn(owner);
+
+        String dummyTaskId = taskManager.startTask(TestSleepingTask.class, owner, new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("owner")))
+        );
+
+        // MEMBER cannot stop other's tasks but as owner it's ok
+        put("/api/task/stop/" + dummyTaskId).withPreemptiveAuthentication("owner", "").should().respond(200);
+    }
+
+    @Test
+    public void test_clean_done_tasks_with_admin_policy() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+
+        taskManager.startTask(TestTask.class, User.local(), new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        DatashareUser john = new DatashareUser("john");
+        john.addProject(projectId);
+        authorizer.addRoleForUserInProject(john, Role.PROJECT_MEMBER, Domain.DEFAULT, project);
+        when(users.find(john.id)).thenReturn(john);
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("john")))
+        );
+
+        // PROJECT_MEMBER on a specific project cannot clean all done tasks (requires domain-level DOMAIN_ADMIN)
+        post("/api/task/clean", "{}").withPreemptiveAuthentication("john", "").should().respond(403);
+        // DOMAIN_ADMIN on wildcard project grants domain-level access for singleTask=false endpoint
+        authorizer.addRoleForUserInDomain(john, Role.DOMAIN_ADMIN, Domain.DEFAULT);
+        post("/api/task/clean", "{}").withPreemptiveAuthentication("john", "").should().respond(200);
+    }
+
+    @Test
+    public void test_clean_done_tasks_forbidden_without_wildcard_role() throws Exception {
+        authorizer = new Authorizer(adapter);
+        String projectId = "test-datashare";
+        Project project = project(projectId);
+
+        taskManager.startTask(TestTask.class, User.local(), new HashMap<>(Map.of(PropertiesProvider.DEFAULT_PROJECT_OPT, projectId)));
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        DatashareUser john = new DatashareUser("john");
+        john.addProject(projectId);
+        // PROJECT_ADMIN on a specific project (not *) is insufficient for singleTask=false wildcard check
+        authorizer.addRoleForUserInDomain(john, Role.PROJECT_ADMIN, Domain.DEFAULT);
+        when(users.find(john.id)).thenReturn(john);
+        TaskPolicyAnnotation taskPolicyAnnotation = new TaskPolicyAnnotation(authorizer, taskManager);
+
+        configure(routes -> routes
+                .registerAroundAnnotation(TaskPolicy.class, taskPolicyAnnotation)
+                .add(new TaskResource(taskFactory, taskManager, getDefaultPropertiesProvider(), batchSearchRepository, taskFinder))
+                .filter(new BasicAuthFilter("/", "icij", DatashareUser.users("john")))
+        );
+
+        // Even DOMAIN_ADMIN on a specific project is denied — singleTask=false requires wildcard access
+        post("/api/task/clean", "{}").withPreemptiveAuthentication("john", "").should().respond(403);
+    }
+
+
+    @Test
+    public void test_cannot_clean_unknown_task() {
+        delete("/api/task/clean/UNKNOWN_TASK_NAME").should().respond(404);
+    }
+
+    @Test
+    public void test_clean_task_preflight() throws IOException {
+        String dummyTaskId = taskManager.startTask(TestTask.class, User.local(), new HashMap<>());
+        taskManager.waitTasksToBeDone(1, SECONDS);
+        options("/api/task/clean/" + dummyTaskId).should().respond(200);
+    }
+
+    @Test
+    public void test_cannot_clean_running_task() throws Exception {
+        String dummyTaskId = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        assertEventuallyHaveState(dummyTaskId, RUNNING, 10000, 100);
+        delete("/api/task/clean/" + dummyTaskId).should().respond(403);
+        assertThat(taskManager.getTasks().toList()).hasSize(1);
+    }
+
+    @Test
+    public void test_stop_task() throws IOException, InterruptedException {
+        String dummyTaskId = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        put("/api/task/stop/" + dummyTaskId).should().respond(200).contain("true");
+
+        assertEventuallyHaveState(dummyTaskId, Task.State.CANCELLED, 10000, 100);
+        get("/api/task/all").should().respond(200).contain("\"state\":\"CANCELLED\"");
+    }
+
+    @Test
+    public void test_stop_unknown_task() {
+        put("/api/task/stop/foobar").should().respond(404);
+    }
+
+    @Test
+    public void test_stop_all() throws IOException, InterruptedException {
+        String t1Id = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        String t2Id = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        put("/api/task/stop").should().respond(200).
+                contain(t1Id + "\":true").
+                contain(t2Id + "\":true");
+
+        assertEventuallyHaveState(t1Id, Task.State.CANCELLED, 1000, 200);
+        assertEventuallyHaveState(t2Id, Task.State.CANCELLED, 1000, 200);
+    }
+
+    @Test
+    public void test_stop_all_filters() throws IOException, InterruptedException {
+        String t1Id = taskManager.startTask(TestSleepingTask.class, User.local(), new HashMap<>());
+        String t2Id = taskManager.startTask(TestAnotherSleepingTask.class, User.local(), new HashMap<>());
+        put("/api/task/stop?name=Another").should().respond(200).contain(t2Id + "\":true");
+
+        assertEventuallyHaveState(t1Id, RUNNING, 1000, 50);
+        assertEventuallyHaveState(t2Id, Task.State.CANCELLED, 1000, 50);
+
+        put("/api/task/stop?name=Sleeping").should().respond(200).contain(t1Id + "\":true");
+        assertEventuallyHaveState(t1Id, Task.State.CANCELLED, 1000, 50);
+    }
+
+    @Test
+    public void test_stop_all_filters_running_tasks() throws IOException {
+        taskManager.startTask(TestTask.class, User.local(), new HashMap<>());
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        put("/api/task/stop").should().respond(200).contain("{}");
+    }
+
+    @Test
+    public void test_clear_done_tasks() throws IOException {
+        taskManager.startTask(TestTask.class, User.local(), new HashMap<>());
+        taskManager.waitTasksToBeDone(1, SECONDS);
+
+        put("/api/task/stop").should().respond(200).contain("{}");
+
+        assertThat(taskManager.clearDoneTasks()).hasSize(1);
+        assertThat(taskManager.getTasks().toList()).hasSize(0);
+    }
+
+    @Test
+    public void test_create_new_task_not_same_id_for_url_and_json() {
+        put("/api/task/my_url_task_id", """
+            {"@type":"Task","id":"my_json_task_id","name":"name",
+            "arguments": {"user":{"@type":"org.icij.datashare.user.User", "id":"local","name":null,"email":null,"provider":"local","details":{"uid":"local","groups_by_applications":{"datashare":["local-datashare"]}}
+            }}}""")
+                .should().respond(400)
+                .should().haveType("application/json")
+                .should().contain("{\"message\":");
+    }
+
+    @Test
+    public void test_create_new_task_with_empty_json() {
+        put("/api/task/my_url_task_id", """
+                {"@type":"Task"}""")
+                .should().respond(400)
+                .should().haveType("application/json")
+                .should().contain("{\"message\":");
+    }
+
+    @Test
+    public void test_create_new_task() {
+        put("/api/task/my_json_task_id", String.format("""
+            {"@type":"Task","id":"my_json_task_id","name":"%s",
+            "arguments": {"user":{"@type":"org.icij.datashare.user.User", "id":"local","name":null,"email":null,"provider":"local","details":{"uid":"local","groups_by_applications":{"datashare":["local-datashare"]}}
+            }}}""", TaskCreation.class.getName()))
+                .should().respond(201);
+    }
+
+    @Test
+    public void test_create_new_task_with_group() {
+        put("/api/task/my_json_task_id?group=Python", String.format("""
+            {"@type":"Task","id":"my_json_task_id","name":"%s",
+            "arguments": {"user":{"@type":"org.icij.datashare.user.User", "id":"local","name":null,"email":null,"provider":"local","details":{"uid":"local","groups_by_applications":{"datashare":["local-datashare"]}}
+            }}}""", TaskCreation.class.getName()))
+                .should().respond(201);
+    }
+
+    @Test
+    public void test_task_list_by_unsupported_filter_should_return_400() {
+        get("/api/task/all?filter=foo").should().respond(400);
+    }
+
+    @NotNull
+    private Map<String, Object> getDefaultProperties() {
+        HashMap<String, Object> map = new HashMap<>() {{
+            put("dataDir", "/default/data/dir");
+            put("foo", "bar");
+            put("batchDownloadDir", "app/tmp");
+            put("defaultProject", "local-datashare");
+            put("queueName", "extract:queue");
+            put("reportName", "extract:report:local-datashare");
+            put("digestProjectName", "local-datashare");
+        }};
+        // Override the queueName with
+        map.put("queueName", new PropertiesProvider(PropertiesProvider.fromMap(map)).queueNameWithHash());
+        return map;
+    }
+
+    @NotNull
+    private PropertiesProvider getDefaultPropertiesProvider() {
+        return new PropertiesProvider(getDefaultProperties());
+    }
+
+    private Optional<Task<?>> findTask(TaskManagerMemory taskManager, String expectedName) throws IOException {
+        return taskManager.getTasks().filter(t -> expectedName.equals(t.name)).findFirst();
+    }
+
+    private void awaitTasksExist(int numberOfTasks, int timeoutMs, int pollIntervalMs) throws IOException, InterruptedException {
+        long start = System.currentTimeMillis();
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (taskManager.getTasks().count() == numberOfTasks) {
+                return;
+            }
+            Thread.sleep(pollIntervalMs);
+        }
+        String msg = "Failed to get "+ numberOfTasks + " existing tasks in the task manager in less than " + timeoutMs + "ms";
+        throw new AssertionError(msg);
+    }
+
+    private void assertEventuallyHaveState(String taskId, Task.State expectedState, int timeoutMs, int pollIntervalMs)
+        throws IOException, InterruptedException {
+        long start = System.currentTimeMillis();
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (TaskResourceTest.taskManager.getTask(taskId).getState() == expectedState) {
+                return;
+            }
+            Thread.sleep(pollIntervalMs);
+        }
+        String msg = "failed to get state " + expectedState + " for task " + taskId + " in less than " + timeoutMs + "ms";
+        throw new AssertionError(msg);
+    }
+}

@@ -1,0 +1,164 @@
+#!/bin/bash
+
+java_bin=${JAVA_HOME:-/usr}/bin/java
+java_opts=${DS_JAVA_OPTS:-''}
+datashare_jar=${DATASHARE_JAR:-/usr/share/java/datashare.jar}
+# All default options for the command line
+datashare_home=${DATASHARE_HOME:-$HOME/.local/share/datashare}
+datashare_data_dir=${DATASHARE_DATA_DIR:-$HOME/Datashare}
+datashare_mode=${DATASHARE_MODE:-EMBEDDED}
+datashare_default_user=${DATASHARE_DEFAULT_USER:-${USER:-local}}
+datashare_queue_type=${DATASHARE_QUEUE_TYPE:-MEMORY}
+datashare_bus_type=${DATASHARE_BUSTYPE:-MEMORY}
+datashare_data_source_url=${DATASHARE_DATA_SOURCE_URL:-jdbc:sqlite:file:$datashare_home/dist/datashare.db}
+datashare_settings=${DATASHARE_SETTINGS:-./dist/datashare.conf}
+datashare_browser_open_link=${DATASHARE_BROWSER_OPEN_LINK:-true}
+datashare_plugins_dir=${DATASHARE_PLUGINS_DIR:-$datashare_home/plugins}
+datashare_extensions_dir=${DATASHARE_EXTENSION_DIR:-$datashare_home/extensions}
+datashare_elasticsearch_path=${DATASHARE_ELASTICSEARCH_PATH:-$datashare_home/elasticsearch}
+datashare_elasticsearch_settings=${DATASHARE_ELASTICSEARCH_SETTINGS:-$datashare_home/elasticsearch.yaml}
+datashare_elasticsearch_data_path=${DATASHARE_ELASTICSEARCH_DATA_PATH:-$datashare_home/index}
+datashare_jna_tmpdir=${DATASHARE_JNA_TMPDIR:-$datashare_home/index/tmp}
+datashare_sync_nlp_models=${DATASHARE_SYNC_NLP_MODELS:-true}
+script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+# Locating Datashare binary
+if [ ! -f "$datashare_jar" ]; then
+  echo "$datashare_jar: not found, trying in this directory"
+  jar_pattern="datashare-dist-*-all.jar"
+  jars=( $jar_pattern )
+  datashare_jar="$PWD/${jars[0]}"
+  if [ ! -f "$datashare_jar" ]; then
+    echo "$datashare_jar: not found"
+    exit 2
+  fi
+fi
+
+# Create every required directories
+mkdir -p \
+  $datashare_data_dir \
+  $datashare_jna_tmpdir \
+  $datashare_home/dist \
+  $datashare_home/index  \
+  $datashare_home/plugins \
+  $datashare_home/extensions
+
+cd $datashare_home || exit
+
+# Detect whether the user is using the new subcommand style. Scan every arg so that
+# parent-command options (e.g. --pluginsDir) can appear before the subcommand name,
+# matching Main.isLegacyInvocation on the Java side.
+is_subcommand=false
+for _arg in "$@"; do
+  case "$_arg" in
+    app|worker|stage|plugin|extension|api-key|user|project|help)
+      is_subcommand=true
+      break
+      ;;
+  esac
+done
+
+# Parse command line arguments to check for mode override and quick exit flags
+args=("$@")
+skip_es_setup=false
+for i in "${!args[@]}"; do
+  case "${args[i]}" in
+    -m|--mode)
+      if [ $((i+1)) -lt ${#args[@]} ]; then
+        datashare_mode="${args[i+1]}"
+      fi
+      ;;
+    --mode=*)
+      datashare_mode="${args[i]#*=}"
+      ;;
+    -h|--help|-v|-V|--version|help)
+      skip_es_setup=true
+      ;;
+  esac
+done
+
+# Setup Elasticsearch if needed (only in EMBEDDED mode and not for help/version)
+if [ "$datashare_mode" = "EMBEDDED" ] && [ "$skip_es_setup" = false ]; then
+  setup_script="/usr/bin/datashare-elasticsearch-setup.sh"
+  local_setup_script="$script_dir/datashare-elasticsearch-setup.sh"
+  if [ -f "$local_setup_script" ]; then
+    bash "$local_setup_script" install
+  elif [ -f "$setup_script" ]; then
+    bash "$setup_script" install
+  fi
+
+  checkEs=$?
+  if [ $checkEs -ne 0 ]; then
+      exit $checkEs
+  fi
+fi
+
+# -XX:UseSVE=0 disables Scalable Vector Extension on ARM; not valid on x86_64
+_arch=$(uname -m)
+_arm_flags=""
+if [ "$_arch" = "aarch64" ] || [ "$_arch" = "arm64" ]; then
+  _arm_flags="-XX:UseSVE=0"
+fi
+
+java_flags="
+  --add-opens java.base/java.lang=ALL-UNNAMED
+  --add-opens java.base/java.util=ALL-UNNAMED
+  --add-opens java.base/java.util.concurrent.locks=ALL-UNNAMED
+  --add-opens java.base/java.net=ALL-UNNAMED
+  $_arm_flags
+  -Xshare:off
+  -DPROD_MODE=true
+  -Dfile.encoding=UTF-8
+  -Djava.system.class.loader=org.icij.datashare.DynamicClassLoader
+  -Djna.tmpdir=$datashare_jna_tmpdir
+  -DDS_SYNC_NLP_MODELS=$datashare_sync_nlp_models
+"
+
+# OpenMP thread limit (process-wide). Tesseract is OpenMP-built, so each
+# tesseract child spawned by Tika would otherwise fan out across every core.
+# With the INDEX consumer already running ~vCPUs workers, that oversubscribes
+# the CPU (~vCPUs x vCPUs threads), blows past Tika's 120s OCR timeout, and
+# silently drops documents. Capping to one OpenMP thread gives one OCR thread
+# per core given parallelism=vCPUs. This is exported process-wide, so it also
+# reaches any other OpenMP/BLAS native code in the JVM or its children (e.g.
+# the spaCy NLP worker subprocess); single-thread-per-worker is the intended
+# invariant there too, since those workers also run in parallel. Override by
+# exporting these yourself.
+export OMP_THREAD_LIMIT=${OMP_THREAD_LIMIT-1}
+export OMP_WAIT_POLICY=${OMP_WAIT_POLICY-passive}
+
+java_cmd="$java_bin $java_opts $java_flags -cp ./dist:$datashare_jar org.icij.datashare.Main"
+
+if [ "$is_subcommand" = true ]; then
+  # New subcommand style: inject the same environment-derived paths the legacy
+  # path uses so CLI invocations talk to the same DB / data dir / config as
+  # the running web server. --mode is omitted because picocli subcommands
+  # force mode=CLI internally. User-supplied flags still override these.
+  $java_cmd \
+      --defaultUserName $datashare_default_user \
+      --dataDir $datashare_data_dir \
+      --dataSourceUrl $datashare_data_source_url \
+      --settings $datashare_settings \
+      --pluginsDir $datashare_plugins_dir \
+      --extensionsDir $datashare_extensions_dir \
+      --elasticsearchPath $datashare_elasticsearch_path \
+      --elasticsearchSettings $datashare_elasticsearch_settings \
+      --elasticsearchDataPath $datashare_elasticsearch_data_path \
+      "$@"
+else
+  # Legacy style: inject default options before user args
+  $java_cmd \
+      --mode $datashare_mode \
+      --dataDir $datashare_data_dir \
+      --queueType $datashare_queue_type \
+      --busType $datashare_bus_type \
+      --dataSourceUrl $datashare_data_source_url \
+      --settings $datashare_settings \
+      --browserOpenLink $datashare_browser_open_link \
+      --pluginsDir $datashare_plugins_dir \
+      --extensionsDir $datashare_extensions_dir \
+      --elasticsearchPath $datashare_elasticsearch_path \
+      --elasticsearchSettings $datashare_elasticsearch_settings \
+      --elasticsearchDataPath $datashare_elasticsearch_data_path \
+      "$@"
+fi

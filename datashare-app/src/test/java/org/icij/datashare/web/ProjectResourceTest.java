@@ -1,0 +1,602 @@
+package org.icij.datashare.web;
+
+import net.codestory.http.filters.basic.BasicAuthFilter;
+import net.codestory.http.security.Users;
+import org.icij.datashare.PropertiesProvider;
+import org.icij.datashare.Repository;
+import org.icij.datashare.asynctasks.Task;
+import org.icij.datashare.cli.Mode;
+import org.icij.datashare.db.JooqRepository;
+import org.icij.datashare.extract.MemoryDocumentCollectionFactory;
+import org.icij.datashare.policies.*;
+import org.icij.datashare.session.DatashareUser;
+import org.icij.datashare.session.LocalUserFilter;
+import org.icij.datashare.session.YesBasicAuthFilter;
+import org.icij.datashare.asynctasks.TaskManager;
+import org.icij.datashare.text.Project;
+import org.icij.datashare.text.indexing.Indexer;
+import org.icij.datashare.user.User;
+import org.icij.datashare.web.testhelpers.AbstractProdWebServerTest;
+import org.icij.extract.extractor.ExtractionStatus;
+import org.icij.extract.queue.DocumentQueue;
+import org.icij.extract.report.Report;
+import org.icij.extract.report.ReportMap;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.mockito.Mock;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.*;
+
+import static java.util.Arrays.asList;
+import static org.fest.assertions.Assertions.assertThat;
+import static org.icij.datashare.text.Project.project;
+import static org.icij.datashare.user.User.localUser;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+import static org.mockito.MockitoAnnotations.initMocks;
+
+public class ProjectResourceTest extends AbstractProdWebServerTest {
+    @Mock Repository repository;
+    @Mock JooqRepository jooqRepository;
+    @Mock Indexer indexer;
+    @Mock
+    TaskManager taskManager;
+    @Rule public TemporaryFolder artifactDir = new TemporaryFolder();
+    MemoryDocumentCollectionFactory<Path> documentCollectionFactory;
+    PropertiesProvider propertiesProvider;
+    Authorizer authorizer;
+    @Mock
+    CasbinRuleAdapter adapter;
+
+    private Users get_datashare_users(String uid, List<String> groups) {
+        User user = new User(new HashMap<>() {{
+            put("uid", uid);
+            put("groups_by_applications", Map.of("datashare", groups));
+        }});
+        return DatashareUser.singleUser(user);
+    }
+
+    private Users get_datashare_users(List<String> groups) {
+        return get_datashare_users("local", groups);
+    }
+
+    @Test
+    public void test_get_project() {
+        Project project = new Project("projectId");
+        when(repository.getProjects(any())).thenReturn(List.of(project));
+        get("/api/project/projectId").should()
+                .respond(200)
+                .contain("\"name\":\"projectId\"")
+                .contain("\"label\":\"projectId\"");
+    }
+
+    @Test
+    public void test_cannot_get_unknown_project() {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        get("/api/project/projectId").should().respond(404);
+    }
+
+    @Test
+    public void test_get_project_with_more_properties() {
+        Project project = new Project(
+                "projectId",
+                "Project ID",
+                "A description",
+                Path.of("/vault/project"),
+                "https://icij.org",
+                "Data Team",
+                "ICIJ",
+                null,
+                "*",
+                new Date(),
+                new Date());
+        when(repository.getProjects(any())).thenReturn(List.of(project));
+        get("/api/project/projectId").should()
+                .respond(200)
+                .contain("\"name\":\"projectId\"")
+                .contain("\"label\":\"Project ID\"")
+                .contain("\"description\":\"A description\"")
+                .contain("\"sourceUrl\":\"https://icij.org\"")
+                .contain("\"maintainerName\":\"Data Team\"")
+                .contain("\"publisherName\":\"ICIJ\"")
+                .contain("\"label\":\"Project ID\"");
+    }
+
+    @Test
+    public void test_get_all_project_in_local_mode() {
+        Project foo = new Project("foo");
+        Project bar = new Project("bar");
+        when(repository.getProjects(any())).thenReturn(asList(foo, bar));
+        get("/api/project/").should().respond(200)
+                .contain("\"name\":\"foo\"")
+                .contain("\"name\":\"bar\"");
+    }
+
+    @Test
+    public void test_get_only_user_project_in_server_mode() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+                put("mode", Mode.SERVER.name());
+            }});
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+            Users datashareUsers = get_datashare_users(asList("foo", "biz"));
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", datashareUsers);
+            routes.filter(basicAuthFilter).add(projectResource);
+        });
+
+        Project foo = new Project("foo");
+        Project bar = new Project("bar");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.getProjects()).thenReturn(asList(foo, bar));
+        get("/api/project/")
+                .withPreemptiveAuthentication("local", "")
+                .should()
+                    .respond(200)
+                    .contain("\"name\":\"foo\"")
+                    .not().contain("\"name\":\"bar\"");
+    }
+
+    @Test
+    public void test_create_project_with_name_and_label() throws IOException {
+        String body = "{ \"name\": \"foo-bar\", \"label\": \"Foo Bar\", \"sourcePath\": \"/vault/foo\" }";
+        when(indexer.createIndex("foo-bar")).thenReturn(true);
+        when(indexer.createIndex("local-datashare")).thenReturn(true);
+        when(repository.save((Project) any())).thenReturn(true);
+        post("/api/project/", body)
+                .should()
+                    .respond(201)
+                    .contain("\"name\":\"foo-bar\"")
+                    .contain("\"label\":\"Foo Bar\"");
+    }
+
+    @Test
+    public void test_create_project() throws IOException {
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo v2\", \"sourcePath\": \"/vault/foo\", \"publisherName\":\"ICIJ\" }";
+        when(indexer.createIndex("foo")).thenReturn(true);
+        when(repository.getProject("foo")).thenReturn(null);
+        when(repository.save((Project) any())).thenReturn(true);
+        post("/api/project/", body).should().respond(201)
+                .contain("\"name\":\"foo\"")
+                .contain("\"label\":\"Foo v2\"")
+                .contain("\"publisherName\":\"ICIJ\"")
+                .contain("\"sourcePath\":\"file:///vault/foo\"");
+    }
+    @Test
+    public void test_cannot_create_project_twice() throws IOException {
+        String body = "{ \"name\": \"foo\", \"sourcePath\": \"/vault/foo\" }";
+        when(indexer.createIndex("foo")).thenReturn(true);
+        when(repository.save((Project) any())).thenReturn(true);
+        when(repository.getProject("foo")).thenReturn(null);
+        post("/api/project/", body).should().respond(201);
+        when(repository.getProject("foo")).thenReturn(new Project("foo"));
+        post("/api/project/", body).should().respond(409);
+    }
+
+    @Test
+    public void test_create_project_without_source_path_defaults_to_data_dir() throws IOException {
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo Bar\", \"publisherName\":\"ICIJ\" }";
+        when(indexer.createIndex("foo")).thenReturn(true);
+        when(repository.getProject("foo")).thenReturn(null);
+        when(repository.save((Project) any())).thenReturn(true);
+        post("/api/project/", body).should().respond(201)
+                .contain("\"name\":\"foo\"")
+                .contain("\"publisherName\":\"ICIJ\"")
+                .contain("\"sourcePath\":\"file:///vault\"");
+    }
+
+    @Test
+    public void test_cannot_create_project_with_source_path_outside_data_dir() {
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo Bar\", \"sourcePath\": \"/home/foo\" }";
+        when(repository.getProject("foo")).thenReturn(null);
+        post("/api/project/", body).should().respond(400);
+    }
+
+    @Test
+    public void test_can_create_project_with_source_path_using_data_dir() throws IOException {
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo Bar\", \"sourcePath\": \"/vault\" }";
+        when(indexer.createIndex("foo")).thenReturn(true);
+        when(repository.save((Project) any())).thenReturn(true);
+        post("/api/project/", body).should().respond(201);
+    }
+
+    @Test
+    public void test_cannot_create_project_without_name() {
+        String body = "{ \"label\": \"Foo Bar\", \"sourcePath\": \"/vault/foo\" }";
+        when(repository.getProject("foo")).thenReturn(null);
+        post("/api/project/", body).should().respond(400);
+    }
+
+    @Test
+    public void test_update_project() {
+        Project oldFoo = new Project("foo", "Foo", Path.of("/vault/foo"), "", "", "", "", "*.*.*.*", null, null);
+        when(repository.getProjects(any())).thenReturn(List.of(oldFoo));
+        when(repository.getProject("foo")).thenReturn(oldFoo);
+        when(repository.save((Project) any())).thenReturn(true);
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo v3\", \"sourcePath\": \"/vault/newFoo/test\"}";
+        put("/api/project/foo", body).should().respond(200)
+                .contain("\"name\":\"foo\"")
+                .contain("\"label\":\"Foo v3\"")
+                .contain("\"sourcePath\":\"file:///vault/newFoo/test\"");
+    }
+
+    @Test
+    public void test_update_existing_project_without_source_path_defaults_to_data_dir() {
+        Project oldFoo = new Project("foo", "Foo", Path.of("/vault/foo"), "", "", "", "", "*.*.*.*", null, null);
+        when(repository.getProjects(any())).thenReturn(List.of(oldFoo));
+        when(repository.getProject("foo")).thenReturn(oldFoo);
+        when(repository.save((Project) any())).thenReturn(true);
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo v4\" }";
+        put("/api/project/foo", body).should().respond(200)
+                .contain("\"label\":\"Foo v4\"")
+                .contain("\"sourcePath\":\"file:///vault\"");
+    }
+
+    @Test
+    public void test_put_creates_project_when_it_does_not_exist() throws IOException {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject("foo")).thenReturn(null);
+        when(repository.save((Project) any())).thenReturn(true);
+        when(indexer.createIndex("foo")).thenReturn(true);
+
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo\", \"sourcePath\": \"/vault/foo\"}";
+        put("/api/project/foo", body).should().respond(201)
+                .contain("\"name\":\"foo\"")
+                .contain("\"label\":\"Foo\"")
+                .contain("\"sourcePath\":\"file:///vault/foo\"");
+    }
+
+    @Test
+    public void test_put_creates_project_without_source_path_defaults_to_data_dir() throws IOException {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject("foo")).thenReturn(null);
+        when(repository.save((Project) any())).thenReturn(true);
+        when(indexer.createIndex("foo")).thenReturn(true);
+
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo\" }";
+        put("/api/project/foo", body).should().respond(201)
+                .contain("\"name\":\"foo\"")
+                .contain("\"sourcePath\":\"file:///vault\"");
+    }
+
+    @Test
+    public void test_put_create_returns_400_when_source_path_outside_data_dir() {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject("foo")).thenReturn(null);
+
+        String body = "{ \"name\": \"foo\", \"label\": \"Foo\", \"sourcePath\": \"/etc/passwd\"}";
+        put("/api/project/foo", body).should().respond(400).contain("sourcePath");
+    }
+
+    @Test
+    public void test_put_create_returns_400_when_name_empty() {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject("foo")).thenReturn(null);
+
+        String body = "{ \"name\": \"\", \"label\": \"Foo\", \"sourcePath\": \"/vault/foo\"}";
+        put("/api/project/foo", body).should().respond(400).contain("name");
+    }
+
+    @Test
+    public void test_put_returns_404_when_body_id_does_not_match_path_id() {
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject("foo")).thenReturn(null);
+
+        // path id is "foo", body id is "bar"
+        String body = "{ \"name\": \"bar\", \"label\": \"Bar\", \"sourcePath\": \"/vault/bar\"}";
+        put("/api/project/foo", body).should().respond(404).contain("mismatch");
+    }
+
+    @Before
+    public void setUp() throws IOException {
+        initMocks(this);
+        authorizer = new Authorizer(adapter);
+
+        documentCollectionFactory = new MemoryDocumentCollectionFactory<>();
+        when(jooqRepository.getProjects()).thenReturn(new ArrayList<>());
+        configure(routes -> {
+            propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+                put("dataDir", "/vault");
+                put("mode", "LOCAL");
+            }});
+
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+            routes.filter(new LocalUserFilter(propertiesProvider, jooqRepository)).add(projectResource);
+        });
+    }
+
+    @Mock
+    Users users;
+
+    public User mockUser(String userId, String projectId, Role role) {
+        Domain domain = Domain.DEFAULT;
+        DatashareUser user = new DatashareUser(localUser(userId, List.of(projectId)));
+        authorizer.addRoleForUserInProject(user, role, domain, project(projectId));
+        user.addProject(projectId);
+        when(jooqRepository.getProject(projectId)).thenReturn(project(projectId));
+        when(users.find(user.id)).thenReturn(user);
+        return user;
+    }
+
+    @Test
+    public void test_update_project_in_server_mode_by_admin() {
+        String projectId = "foo";
+        //setup SERVER properties
+        PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+            put("mode", Mode.SERVER.name());
+            put("dataDir", "/my-dir");
+        }});
+
+        ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+        // add policies
+        User john = mockUser("john", projectId, Role.PROJECT_ADMIN);
+        PolicyAnnotation policyAnnotation = new PolicyAnnotation(authorizer);
+
+        configure(routes -> {
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", DatashareUser.singleUser(john));
+            routes.filter(basicAuthFilter).registerAroundAnnotation(Policy.class, policyAnnotation).add(projectResource);
+        });
+
+        Project foo = new Project(projectId, Path.of("/my-dir/foo"));
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+
+        when(repository.getProject(projectId)).thenReturn(foo);
+        when(repository.save((Project) any())).thenReturn(true);
+        String body = "{ \"name\": \"foo\", \"sourcePath\": \"/my-dir/foo/test\", \"label\": \"Foo Hello\"}";
+        put("/api/project/foo", body).withPreemptiveAuthentication("john", "pass").should().respond(200).contain("\"name\":\"foo\"")
+                .contain("\"label\":\"Foo Hello\"")
+                .contain("\"sourcePath\":\"file:///my-dir/foo/test\"");
+    }
+
+    @Test
+    public void test_cannot_update_project_in_server_mode_by_non_admin() {
+        String projectId = "foo";
+        PropertiesProvider propertiesProvider =new PropertiesProvider(Collections.singletonMap("mode", Mode.SERVER.name()));
+        ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+
+        User elios = mockUser("elios", projectId, Role.PROJECT_MEMBER);
+
+        PolicyAnnotation policyAnnotation = new PolicyAnnotation(authorizer);
+
+        configure(routes -> {
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", DatashareUser.singleUser(elios));
+            routes.filter(basicAuthFilter).registerAroundAnnotation(Policy.class, policyAnnotation).add(projectResource);
+        });
+        when(repository.getProject(projectId)).thenReturn(new Project(projectId));
+        when(repository.save((Project) any())).thenReturn(true);
+        String body = "{ \"name\": \"foo\" }";
+        put("/api/project/foo", body).withPreemptiveAuthentication("elios", "pass").should().respond(403);
+    }
+
+    @Test
+    public void test_put_create_in_server_mode_by_instance_admin() throws IOException {
+        String projectId = "foo";
+        PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+            put("mode", Mode.SERVER.name());
+            put("dataDir", "/my-dir");
+        }});
+
+        ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+
+        DatashareUser jane = new DatashareUser(localUser("jane"));
+        authorizer.addRoleForUserInInstance(jane, Role.INSTANCE_ADMIN);
+        PolicyAnnotation policyAnnotation = new PolicyAnnotation(authorizer);
+
+        configure(routes -> {
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", DatashareUser.singleUser(jane));
+            routes.filter(basicAuthFilter).registerAroundAnnotation(Policy.class, policyAnnotation).add(projectResource);
+        });
+
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>());
+        when(repository.getProject(projectId)).thenReturn(null);
+        when(repository.save((Project) any())).thenReturn(true);
+        when(indexer.createIndex(projectId)).thenReturn(true);
+
+        String body = "{ \"name\": \"foo\", \"sourcePath\": \"/my-dir/foo\", \"label\": \"Foo\"}";
+        put("/api/project/foo", body).withPreemptiveAuthentication("jane", "pass").should().respond(201)
+                .contain("\"name\":\"foo\"");
+    }
+
+    @Test
+    public void test_put_create_in_server_mode_forbidden_for_project_admin_of_other_project() {
+        PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+            put("mode", Mode.SERVER.name());
+            put("dataDir", "/my-dir");
+        }});
+        ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+
+        // grant PROJECT_ADMIN on "bar", then PUT to "foo" (which does not exist)
+        User john = mockUser("john", "bar", Role.PROJECT_ADMIN);
+        PolicyAnnotation policyAnnotation = new PolicyAnnotation(authorizer);
+
+        configure(routes -> {
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", DatashareUser.singleUser(john));
+            routes.filter(basicAuthFilter).registerAroundAnnotation(Policy.class, policyAnnotation).add(projectResource);
+        });
+
+        when(repository.getProject("foo")).thenReturn(null);
+
+        String body = "{ \"name\": \"foo\", \"sourcePath\": \"/my-dir/foo\"}";
+        put("/api/project/foo", body).withPreemptiveAuthentication("john", "pass").should().respond(403);
+    }
+
+    @Test
+    public void test_put_update_still_requires_user_access() {
+        PropertiesProvider propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+            put("mode", Mode.SERVER.name());
+            put("dataDir", "/my-dir");
+        }});
+        ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+
+        // jane is INSTANCE_ADMIN so policy check passes, but getUserProject must still gate the update branch
+        DatashareUser jane = new DatashareUser(localUser("jane"));
+        authorizer.addRoleForUserInInstance(jane, Role.INSTANCE_ADMIN);
+        PolicyAnnotation policyAnnotation = new PolicyAnnotation(authorizer);
+
+        configure(routes -> {
+            BasicAuthFilter basicAuthFilter = new BasicAuthFilter("/", "icij", DatashareUser.singleUser(jane));
+            routes.filter(basicAuthFilter).registerAroundAnnotation(Policy.class, policyAnnotation).add(projectResource);
+        });
+
+        // project EXISTS in repo, but jane does NOT have it in her project list
+        Project existingFoo = new Project("foo", Path.of("/my-dir/foo"));
+        when(repository.getProject("foo")).thenReturn(existingFoo);
+        when(repository.getProjects(any())).thenReturn(new ArrayList<>()); // jane sees no projects
+        when(repository.save((Project) any())).thenReturn(true);
+
+        String body = "{ \"name\": \"foo\", \"sourcePath\": \"/my-dir/foo\"}";
+        put("/api/project/foo", body).withPreemptiveAuthentication("jane", "pass").should().respond(404).contain("Project not found");
+    }
+
+
+    @Test
+    public void test_is_allowed() {
+        Project project = new Project("local-datashare", "127.0.0.1");
+        when(repository.getProject("local-datashare")).thenReturn(project);
+        get("/api/project/isDownloadAllowed/local-datashare").should().respond(200);
+    }
+
+    @Test
+    public void test_unknown_is_allowed() {
+        get("/api/project/isDownloadAllowed/projectId").should().respond(200);
+    }
+
+    @Test
+    public void test_is_not_allowed() {
+        when(repository.getProject("local-datashare")).thenReturn(new Project("local-datashare", "127.0.0.2"));
+        get("/api/project/isDownloadAllowed/local-datashare").should().respond(403);
+    }
+
+    @Test
+    public void test_delete_project() {
+        Project foo = new Project("local-datashare");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("local-datashare")).thenReturn(true).thenReturn(false);
+        delete("/api/project/local-datashare").should().respond(204);
+        delete("/api/project/local-datashare").should().respond(204);
+    }
+
+    @Test
+    public void test_delete_project_even_without_index() throws IOException {
+        Project foo = new Project("foo");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(indexer.deleteAll(foo.getId())).thenReturn(false);
+        delete("/api/project/foo").should().respond(204);
+    }
+
+    @Test
+    public void test_delete_project_only_delete_index() throws Exception {
+        Project foo = new Project("local-datashare");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("local-datashare")).thenReturn(false).thenReturn(false);
+        when(indexer.deleteAll("local-datashare")).thenReturn(true).thenReturn(false);
+        delete("/api/project/local-datashare").should().respond(204);
+        delete("/api/project/local-datashare").should().respond(204);
+    }
+
+    @Test
+    public void test_delete_project_delete_artifacts() throws Exception {
+        configure(routes -> {
+            propertiesProvider = new PropertiesProvider(new HashMap<>() {{
+                put("dataDir", "/vault");
+                put("mode", "LOCAL");
+                put("artifactDir", artifactDir.getRoot().toString());
+            }});
+
+            ProjectResource projectResource = new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory);
+            routes.filter(new LocalUserFilter(propertiesProvider, jooqRepository)).add(projectResource);
+        });
+
+        artifactDir.newFolder("test-datashare");
+        artifactDir.newFile("test-datashare/foo");
+        Project project = new Project("test-datashare");
+        when(repository.getProjects(any())).thenReturn(List.of(project));
+        when(repository.deleteAll(project.getId())).thenReturn(false).thenReturn(false);
+        when(indexer.deleteAll(project.getId())).thenReturn(true).thenReturn(false);
+        delete("/api/project/test-datashare").should().respond(204);
+        assertThat(artifactDir.getRoot().toPath().resolve(project.getId()).toFile()).doesNotExist();
+    }
+
+    @Test
+    public void test_delete_project_with_unauthorized_user() {
+        configure(routes -> {
+            PropertiesProvider propertiesProvider = new PropertiesProvider(Collections.singletonMap("mode", Mode.SERVER.name()));
+            routes.filter(new YesBasicAuthFilter(propertiesProvider, null))
+                    .add(new ProjectResource(repository, indexer, taskManager, propertiesProvider, documentCollectionFactory));
+        });
+        when(repository.deleteAll("hacker-datashare")).thenReturn(true);
+        when(repository.deleteAll("projectId")).thenReturn(true);
+        delete("/api/project/hacker-datashare").withPreemptiveAuthentication("hacker", "pass").should().respond(403);
+        delete("/api/project/projectId").should().respond(401);
+    }
+
+    @Test
+    public void test_delete_all_projects() throws Exception{
+        Project foo = new Project("foo");
+        Project bar = new Project("bar");
+        Task<?> task = new Task<>("name", User.local(), new HashMap<>());
+        when(repository.getProjects(any())).thenReturn(asList(foo, bar));
+        when(repository.deleteAll("foo")).thenReturn(true).thenReturn(false);
+        when(repository.deleteAll("bar")).thenReturn(true).thenReturn(false);
+        when(taskManager.clearDoneTasks()).thenReturn(List.of(task)).thenReturn(List.of());
+        delete("/api/project/").should().respond(204);
+    }
+
+    @Test
+    public void test_delete_project_and_its_legacy_queue() {
+        Project foo = new Project("foo");
+        DocumentQueue<Path> queue = documentCollectionFactory.createQueue("extract:queue:foo", Path.class);
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("foo")).thenReturn(true);
+        queue.add(Path.of("/"));
+        assertThat(queue.size()).isEqualTo(1);
+        delete("/api/project/foo").should().respond(204);
+        assertThat(queue.size()).isEqualTo(0);
+    }
+
+    @Test
+    public void test_delete_project_and_its_index_queue() {
+        Project foo = new Project("foo");
+        DocumentQueue<Path> queue = documentCollectionFactory.createQueue("extract:queue:foo:index", Path.class);
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("foo")).thenReturn(true);
+        queue.add(Path.of("/"));
+        assertThat(queue.size()).isEqualTo(1);
+        delete("/api/project/foo").should().respond(204);
+        assertThat(queue.size()).isEqualTo(0);
+    }
+
+
+    @Test
+    public void test_delete_project_and_it_nlp_queue() {
+        Project foo = new Project("foo");
+        DocumentQueue<Path> queue = documentCollectionFactory.createQueue("extract:queue:foo:index", Path.class);
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("foo")).thenReturn(true);
+        queue.add(Path.of("/"));
+        assertThat(queue.size()).isEqualTo(1);
+        delete("/api/project/foo").should().respond(204);
+        assertThat(queue.size()).isEqualTo(0);
+    }
+
+    @Test
+    public void test_delete_project_and_its_report_map() {
+        Project foo = new Project("foo");
+        ReportMap reportMap = documentCollectionFactory.createMap("extract:report:foo");
+        when(repository.getProjects(any())).thenReturn(List.of(foo));
+        when(repository.deleteAll("foo")).thenReturn(true);
+        reportMap.put(Path.of("/"), new Report(ExtractionStatus.SUCCESS));
+        assertThat(reportMap.size()).isEqualTo(1);
+        delete("/api/project/foo").should().respond(204);
+        assertThat(reportMap.size()).isEqualTo(0);
+    }
+
+    @Test
+    public void test_delete_project_not_existing_on_user_returns_401() {
+        when(repository.getProjects(any())).thenReturn(List.of());
+        delete("/api/project/unknown-project").should().respond(401);
+    }
+}

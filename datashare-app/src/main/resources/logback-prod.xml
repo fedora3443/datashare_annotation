@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <contextName>production</contextName>
+    <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- Drop benign, high-volume PDFBox/FontBox font-fallback, xref-repair and no-Unicode-mapping
+             warnings (~85% of WARN volume) while keeping genuine PDF/font errors visible. -->
+        <filter class="org.icij.extract.log.PdfBoxNoiseFilter"/>
+        <encoder>
+            <pattern>%d [%thread] %-5level %logger{0} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    <!-- Drop benign, high-volume Apache POI parsing noise on legacy Office files;
+         message-targeted so other POI diagnostics stay visible (see the filter class). -->
+    <turboFilter class="org.icij.datashare.log.PoiNoiseTurboFilter" />
+
+    <root level="INFO">
+        <appender-ref ref="stdout"/>
+    </root>
+</configuration>

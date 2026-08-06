@@ -1,0 +1,648 @@
+version: 2.1
+
+# Shared environment variables
+ds_env: &ds_env
+  JAVA_HOME: /usr/lib/jvm/java-21-openjdk-amd64
+  DS_POSTGRES_HOST: localhost
+  DS_POSTGRES_PORT: 5432
+  DS_POSTGRES_USER: dstest
+  DS_POSTGRES_PASSWORD: test
+  DS_TEMPORAL_TARGET: localhost:7233
+  DS_POSTGRES_URI: jdbc:postgresql://localhost/dstest?user=dstest&password=test
+  DS_POSTGRES_BUILD_URI: jdbc:postgresql://localhost/dsbuild?user=dstest&password=test
+  DS_AMQP_URI: amqp://guest:guest@localhost:5673
+  DS_ELASTICSEARCH_URI: http://localhost:9200
+  DS_REDIS_URI: redis://localhost:6379
+  DS_S3MOCK_URI: http://localhost:9090
+
+parameters:
+  publish_backend_doc:
+    type: boolean
+    default: false
+
+jobs:
+
+  build_back:
+    resource_class: large
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    working_directory: /tmp/datashare
+
+    environment:
+      <<: *ds_env
+      MAVEN_OPTS: "-Xms512m -Xmx1g -Xss10M"
+
+    steps:
+      - checkout
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+          - v1-dependencies-{{ checksum "pom.xml" }}
+
+      - run:
+          name: Start services
+          command: docker-compose up -d --wait --build elasticsearch postgres redis amqp s3mock temporal
+
+      - run:
+          name: Configure GPG private key for signing project artifacts in OSS Sonatype
+          shell: /bin/bash
+          command: |
+            echo ${RELEASES_GPG_PRIV_BASE64} | base64 --decode | gpg --batch --no-tty --import --yes
+
+      - run:
+          name: Install system dependencies
+          command: |
+            sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google.list
+            sudo apt-get update
+            sudo apt-get install -y --fix-missing tesseract-ocr-eng postgresql-client
+      - run:
+          name: Write devenv properties
+          command: |
+            echo "amqpUri=${DS_AMQP_URI}" > datashare-devenv.properties
+            echo "elasticsearchUri=${DS_ELASTICSEARCH_URI}" >> datashare-devenv.properties
+            echo "postgresUri=${DS_POSTGRES_URI}" >> datashare-devenv.properties
+            echo "temporalAddress=${DS_TEMPORAL_TARGET}" >> datashare-devenv.properties
+            echo "postgresBuildUri=${DS_POSTGRES_BUILD_URI}" >> datashare-devenv.properties
+            echo "redisUri=${DS_REDIS_URI}" >> datashare-devenv.properties
+            echo "s3mockUri=${DS_S3MOCK_URI}" >> datashare-devenv.properties
+      - run: make clean
+      - run: make migrate
+      - run: make test
+      - run:
+          name: Make install for app and corenlp modules
+          command: mvn -s .circleci/resources/maven-release-settings.xml -pl datashare-app -pl datashare-nlp-corenlp -am install -Dmaven.test.skip=true
+      - when:
+          condition:
+            equal: [ main, << pipeline.git.branch >> ]
+          steps:
+            - run: .circleci/scripts/publish-doc-if-necessary.sh
+      - run: mvn -pl datashare-dist package
+      - save_cache:
+          paths:
+            - ~/.m2
+          key: v1-dependencies-{{ checksum "pom.xml" }}
+
+  publish_doc:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    working_directory: ~/datashare
+    environment:
+      <<: *ds_env
+      MAVEN_OPTS: "-Xms512m -Xmx512m -Xss10M"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "pom.xml" }}
+      - run:
+          name: Start services
+          command: docker-compose up -d --wait --build elasticsearch postgres
+      - run:
+          name: Prepare SSH directory
+          command: |
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+      - add_ssh_keys:
+          fingerprints:
+            # This deploy key has read-write permission on ICIJ/datashare-docs repository
+            # @see https://app.circleci.com/settings/project/github/ICIJ/datashare/ssh
+            # @see https://github.com/ICIJ/datashare-docs/settings/keys
+            - "d0:5d:4a:ba:8a:55:2e:1f:6f:ad:57:c5:e0:21:ce:34"
+      - run:
+          name: Configure Git identity
+          command: |
+            git config --global user.name $CIRCLE_USERNAME
+            git config --global user.email "engineering@icij.org"
+      - run:
+          name: Checkout Datashare Doc repository
+          command: |
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            git clone git@github.com:ICIJ/datashare-docs.git ~/datashare-docs
+      - run:
+          name: Install postgres
+          command: |
+            wget --no-check-certificate --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+            sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client-15
+      - run:
+          name: Generate db doc
+          command: |
+            echo "${DS_POSTGRES_HOST}:${DS_POSTGRES_PORT}:*:${DS_POSTGRES_USER}:${DS_POSTGRES_PASSWORD}" > ~/.pgpass && chmod 600 ~/.pgpass
+            echo "postgresUri=${DS_POSTGRES_URI}" > datashare-devenv.properties
+            echo "postgresBuildUri=${DS_POSTGRES_BUILD_URI}" >> datashare-devenv.properties
+            make migrate
+            ./datashare-db/scripts/build-db-doc.sh > ~/datashare-docs/developers/backend/database.md
+      - run:
+          name: Add/Commit changes to the doc
+          command: |
+            git -C ~/datashare-docs add -A
+            git -C ~/datashare-docs commit -am "doc: update backend documentation [${CIRCLE_SHA1}]" || true
+      - run:
+          name: Push changes to the doc
+          command: git -C ~/datashare-docs push origin main
+
+  deploy_back:
+    docker:
+      - image: cimg/openjdk:21.0.9
+    working_directory: /tmp
+    steps:
+      - attach_workspace:
+          at: /tmp/datashare
+      - run:
+          name: Deploy datashare dist and es mappings/settings jar to github release
+          command: |
+            upload_url=$(curl -X POST -s -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -d "{\"tag_name\":\"${CIRCLE_TAG}\", \"name\":\"${CIRCLE_TAG}\",\"body\":\"release ${CIRCLE_TAG}\"}" "https://api.github.com/repos/ICIJ/datashare/releases" | jq -r '.upload_url')
+            upload_url="${upload_url%\{*}"
+            echo "extracting es json files from jar"
+            jar xf /tmp/datashare/datashare-dist/target/datashare-dist-${CIRCLE_TAG}-back.jar datashare_index_mappings.json datashare_index_settings.json datashare_index_settings_windows.json
+            echo "uploading asset to release url: $upload_url"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/java-archive" --data-binary "@/tmp/datashare/datashare-dist/target/datashare-dist-${CIRCLE_TAG}-all.jar" "$upload_url?name=datashare-dist-${CIRCLE_TAG}-all.jar&label=datashare-dist-${CIRCLE_TAG}-all.jar"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/java-archive" --data-binary "@/tmp/datashare/datashare-dist/target/datashare-dist-${CIRCLE_TAG}-back.jar" "$upload_url?name=datashare-dist-${CIRCLE_TAG}.jar&label=datashare-dist-${CIRCLE_TAG}.jar"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" --data-binary "@datashare_index_mappings.json" "$upload_url?name=datashare_index_mappings.json&label=datashare_index_mappings.json"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" --data-binary "@datashare_index_settings.json" "$upload_url?name=datashare_index_settings.json&label=datashare_index_settings.json"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" --data-binary "@datashare_index_settings_windows.json" "$upload_url?name=datashare_index_settings_windows.json&label=datashare_index_settings_windows.json"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" --data-binary "@datashare/datashare_openapi.json" "$upload_url?name=datashare_openapi.json&label=datashare_openapi.json"
+
+  build_front:
+    resource_class: large
+    docker:
+      - image: cimg/node:20.19
+      - image: docker.elastic.co/elasticsearch/elasticsearch:8.19.8
+        environment:
+          ES_JAVA_OPTS: -Xms256m -Xmx256m
+          discovery.type: single-node
+          cluster.name: datashare
+          cluster.routing.allocation.disk.watermark.low: 90%
+          cluster.routing.allocation.disk.watermark.high: 99%
+          cluster.routing.allocation.disk.watermark.flood_stage: 100%
+          http.compression: false
+          http.cors.enabled: true
+          http.cors.allow-origin: "'*'"
+          http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+          indices.query.bool.max_clause_count: 20000
+          indices.id_field_data.enabled: true
+          xpack.security.enabled: false
+          xpack.security.http.ssl.enabled: false
+        name: elasticsearch
+    working_directory: /tmp
+    steps:
+      - attach_workspace:
+           at: /tmp/datashare
+      - run:
+           name: adds_ssh_dir
+           command: |
+             mkdir -p ~/.ssh
+             chmod 700 ~/.ssh
+      - add_ssh_keys:
+          fingerprints:
+            - "b3:e6:7c:f3:86:9e:e9:88:d1:cf:22:8c:97:3e:93:54"
+      - run:
+          name: Clone
+          command: |
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            git clone git@github.com:ICIJ/datashare-client.git
+      - run:
+          name: Release client on GitHub
+          command: |
+            upload_url=$(curl -X POST -s -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -d "{ \"tag_name\": \"${CIRCLE_TAG}\", \"target_commitish\": \"main\", \"name\": \"${CIRCLE_TAG}\", \"body\": \"Released by Circle CI\", \"draft\": false, \"prerelease\": false }" "https://api.github.com/repos/ICIJ/datashare-client/releases")
+            echo $upload_url > /tmp/datashare-client/datashare-client.url
+      - run:
+          name: Checkout tag
+          command: |
+            cd datashare-client
+            git pull origin main --tags
+            git checkout ${CIRCLE_TAG}
+      - restore_cache:
+          keys:
+            - dependency-cache-{{ checksum "/tmp/datashare-client/package.json" }}
+            - dependency-cache-
+      - run:
+          name: Make install
+          command: |
+            cd /tmp/datashare-client
+            make install
+      - save_cache:
+          key: dependency-cache-{{ checksum "/tmp/datashare-client/package.json" }}
+          paths:
+            - /tmp/datashare-client/node_modules
+      - run:
+          name: Run tests
+          command: |
+            cd /tmp/datashare-client
+            yarn test:unit --silent --minWorkers 1 --maxWorkers 2  
+      - run:
+          name: Build the front for distribution
+          command: |
+            cd /tmp/datashare-client
+            yarn build --outDir dist/
+      - persist_to_workspace:
+          root: /tmp/datashare-client
+          paths:
+            - dist
+            - datashare-client.url
+
+  deploy_front:
+    docker:
+      - image: cimg/node:20.19
+    working_directory: /tmp
+    steps:
+      - attach_workspace:
+          at: /tmp/datashare
+      - run:
+          name: Deploy datashare-client dist to github release
+          command: |
+            cd /tmp/datashare/dist
+            tar czf ../datashare-client-${CIRCLE_TAG}.tgz .
+            zip -r ../datashare-client-${CIRCLE_TAG}.zip .
+            upload_url=$(cat /tmp/datashare/datashare-client.url | jq -r '.upload_url')
+            if [ "$upload_url" = "null" ]; then
+              upload_url=$(curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/ICIJ/datashare-client/releases/tags/${CIRCLE_TAG}" | jq -r '.upload_url')
+            fi
+            upload_url="${upload_url%\{*}"
+            echo "uploading asset to release url: $upload_url"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/zip" --data-binary "@/tmp/datashare/datashare-client-${CIRCLE_TAG}.zip" "$upload_url?name=datashare-client-${CIRCLE_TAG}.zip&label=datashare-client-${CIRCLE_TAG}.zip"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/gzip" --data-binary "@/tmp/datashare/datashare-client-${CIRCLE_TAG}.tgz" "$upload_url?name=datashare-client-${CIRCLE_TAG}.tgz&label=datashare-client-${CIRCLE_TAG}.tgz"
+
+  package_back:
+    docker:
+      - image: cimg/openjdk:21.0.9
+    working_directory: /tmp/datashare
+    environment:
+      MAVEN_OPTS: "-Xms512m -Xmx1g -Xss10M"
+    steps:
+      - attach_workspace:
+          at: /tmp/datashare-client
+      - checkout
+
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "pom.xml" }}
+      - run:
+          name: Copy the app from the front to an "app" subfolder
+          command: |
+            rm -Rf /tmp/datashare/app
+            cp -R /tmp/datashare-client/dist /tmp/datashare/app
+      - run:
+          name: Make dist including frontend
+          command: mvn -pl datashare-dist package
+      - run:
+          name: Make tarball for non debian linux
+          command: |
+            cp /tmp/datashare/datashare-dist/src/main/deb/bin/datashare /tmp/datashare/datashare-dist/target
+            cd /tmp/datashare/datashare-dist/target
+            tar cvzf datashare-dist-${CIRCLE_TAG}.tgz datashare datashare-dist-${CIRCLE_TAG}-all.jar
+      - persist_to_workspace:
+          root: /tmp/datashare
+          paths:
+            - datashare-dist
+
+  build_docker:
+    docker:
+      - image: docker:27.5.1
+    working_directory: /tmp
+    steps:
+      - attach_workspace:
+           at: /tmp/datashare
+      - setup_remote_docker
+      - run:
+          name: Login to Docker hub
+          command: |
+            docker login -u ${DOCKER_USER} -p ${DOCKER_PASS}
+      - run:
+          name: Install tonistiigi/binfmt support for additional platforms
+          command: |
+            docker run --privileged --rm tonistiigi/binfmt:qemu-v7.0.0-28 --install all
+      - run:
+          name: Build and push the image for several platform
+          command: |
+            cd /tmp/datashare/datashare-dist/target/datashare-dist-$CIRCLE_TAG-docker/
+            docker buildx create --use
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              -t icij/datashare:${CIRCLE_TAG} \
+              --push .
+
+  build_installers:
+    resource_class: large
+    docker:
+      - image: cimg/rust:1.81.0
+    working_directory: /tmp
+    steps:
+      - attach_workspace:
+          at: /tmp/datashare
+      - restore_cache:
+          keys:
+            - cargo-cache-v1
+      - run:
+          name: Install dependencies
+          command: |
+            sudo apt-get update && sudo apt-get install -y --fix-missing nsis cpio jq imagemagick icnsutils libxml2-dev
+            wget https://nsis.sourceforge.io/mediawiki/images/c/c9/Inetc.zip && unzip Inetc.zip && sudo cp Plugins/x86-unicode/INetC.dll /usr/share/nsis/Plugins/x86-unicode/ && echo "cp INetC.dll done"
+            wget https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip && unzip EnVar_plugin.zip && sudo cp Plugins/x86-unicode/EnVar.dll /usr/share/nsis/Plugins/x86-unicode && echo "cp EnVar.dll done"
+            wget https://github.com/ICIJ/bomutils/archive/refs/heads/master.zip && unzip master.zip && cd bomutils-master && make && sudo make install
+            wget https://github.com/mackyle/xar/archive/refs/tags/xar-1.6.1.tar.gz && tar -zxf xar-1.6.1.tar.gz && cd xar-xar-1.6.1/xar && sed -i 's/OpenSSL_add_all_ciphers/OPENSSL_init_crypto/g' configure.ac && ./autogen.sh && make && sudo make install
+            wget https://nsis.sourceforge.io/mediawiki/images/9/9d/Untgz.zip  && unzip Untgz.zip && sudo cp untgz/untgz.dll /usr/share/nsis/Plugins/ && echo "cp untgz.dll done"
+            cargo install --git https://github.com/indygreg/apple-platform-rs.git apple-codesign --tag apple-codesign/0.29.0 --locked
+      - save_cache:
+          key: cargo-cache-v1
+          paths:
+            - $HOME/.cargo
+      - run:
+          name: Adds SSH directory
+          command: |
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+      - add_ssh_keys:
+          fingerprints:
+          - "b3:e6:7c:f3:86:9e:e9:88:d1:cf:22:8c:97:3e:93:54"
+      - run:
+          name: Configure Git identity
+          command: |
+            git config --global user.name $CIRCLE_USERNAME
+            git config --global user.email "engineering@icij.org"
+      - run:
+          name: Checkout
+          command: |
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            git clone git@github.com:ICIJ/datashare-installer.git
+      - run:
+          name: Build Mac installer
+          command: |
+            cd /tmp/datashare-installer/mac
+            make VERSION=${CIRCLE_TAG} all
+      - run:
+          name: Build Windows installer
+          command: |
+            cd /tmp/datashare-installer/windows
+            make VERSION=${CIRCLE_TAG} all
+      - run:
+          name: Populate VERSION.txt file
+          command: echo $CIRCLE_TAG > /tmp/datashare-installer/VERSION.txt
+      - run:
+          name: Commit version changes
+          command: |
+            git -C /tmp/datashare-installer/ commit -am "build: bump to ${CIRCLE_SHA1}" || true
+      - run:
+          name: Push changes
+          command: git -C /tmp/datashare-installer/ push origin main
+      - run:
+          name: Create git tag
+          command: | 
+            curl -s -H "Authorization: token $GITHUB_TOKEN" -d "{\"tag_name\":\"${CIRCLE_TAG}\", \"name\":\"${CIRCLE_TAG}\",\"body\":\"release ${CIRCLE_TAG}\",\"prerelease\":true}" "https://api.github.com/repos/ICIJ/datashare-installer/releases"
+      - run:
+          name: Deploy installers on github
+          command: |
+            cd /tmp/datashare-installer
+            ./deploy.sh ${CIRCLE_TAG}
+            upload_url=$(curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/ICIJ/datashare-installer/releases/tags/${CIRCLE_TAG}" | jq -r '.upload_url')
+            upload_url="${upload_url%\{*}"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/vnd.debian.binary-package" --data-binary "@/tmp/datashare/datashare-dist/target/datashare-dist-${CIRCLE_TAG}.deb" "$upload_url?name=datashare-${CIRCLE_TAG}.deb&label=datashare-${CIRCLE_TAG}.deb"
+            curl -X POST -s -m 120 -H "Accept: application/vnd.github.v3+json" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/gzip" --data-binary "@/tmp/datashare/datashare-dist/target/datashare-dist-${CIRCLE_TAG}.tgz" "$upload_url?name=datashare-${CIRCLE_TAG}.tgz&label=datashare-${CIRCLE_TAG}.tgz"
+
+  install_elastic_search:
+    docker:
+      - image: cimg/base:current
+    environment:
+      DATASHARE_HOME: "/tmp/datashare"
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            # Use the checksum of the script to use a new cache entry if the version of es changes in the script
+            - elasticsearch-{{ checksum "datashare-dist/src/main/deb/bin/datashare-elasticsearch-setup.sh" }}
+      - run:
+          name: Install elasticsearch
+          command: make elasticsearch
+      - save_cache:
+          key: elasticsearch-{{ checksum "datashare-dist/src/main/deb/bin/datashare-elasticsearch-setup.sh" }}
+          paths:
+            - /tmp/datashare/elasticsearch
+      - persist_to_workspace:
+          root: /tmp/datashare
+          paths:
+            - elasticsearch
+
+  create_openapi_json:
+    docker:
+      - image: cimg/openjdk:21.0.9
+    working_directory: /tmp/datashare
+    steps:
+      - attach_workspace:
+          at: /tmp/datashare
+      - run:
+          name: Launch datashare
+          command: java -jar datashare-dist/target/datashare-dist-${CIRCLE_TAG}-all.jar --dataSourceUrl 'jdbc:sqlite:file:memorydb.db?mode=memory&cache=shared' --elasticsearchPath /tmp/datashare/elasticsearch -m EMBEDDED
+          background: true
+      - run:
+          name: Wait for datashare to be started
+          command: curl --retry 20 --retry-delay 5 --retry-all-errors 'http://localhost:8080/api/status'
+      - run:
+          name: Generate openAPI json file
+          command: curl -s http://localhost:8080/api/openapi | jq > datashare_openapi.json
+      - persist_to_workspace:
+          root: /tmp/datashare
+          paths:
+            - datashare_openapi.json
+
+  deploy_datashare_tasks:
+    resource_class: large
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+
+    environment:
+      <<: *ds_env
+      MAVEN_OPTS: "-Xms512m -Xmx1g -Xss10M"
+
+    steps:
+      - checkout
+      - run:
+          name: Start services
+          command: docker-compose up -d --wait --build postgres redis amqp s3mock temporal
+      - run:
+          name: Configure GPG private key for signing project artifacts in OSS Sonatype
+          shell: /bin/bash
+          command: |
+            echo ${RELEASES_GPG_PRIV_BASE64} | base64 --decode | gpg --batch --no-tty --import --yes
+      - run:
+          name: Write devenv properties
+          command: |
+            echo "amqpUri=${DS_AMQP_URI}" > datashare-devenv.properties
+            echo "s3mockUri=${DS_S3MOCK_URI}" >> datashare-devenv.properties
+            echo "temporalAddress=${DS_TEMPORAL_TARGET}" >> datashare-devenv.properties
+            echo "redisUri=${DS_REDIS_URI}" >> datashare-devenv.properties
+            echo "postgresBuildUri=${DS_POSTGRES_BUILD_URI}" >> datashare-devenv.properties
+            echo "postgresUri=${DS_POSTGRES_URI}" >> datashare-devenv.properties
+      - run:
+          name: Build and deploy datashare-tasks
+          no_output_timeout: 1h
+          command: |
+            export DATASHARE_API_ARTIFACT=$(mvn dependency:tree -pl datashare-tasks -Dmaven.test.skip=true  | grep -vi download | grep "datashare-api" | awk '{print $3}')
+            ./.circleci/scripts/check-if-artifact-is-deployed.sh "$DATASHARE_API_ARTIFACT"
+            export DATASHARE_VERSION=$(head pom.xml | grep '<version>[0-9.]\+' | sed 's/<version>\([0-9.]\+\..*\)<\/version>/\1/g' | tr -d '[:space:]')
+            if ! ./.circleci/scripts/check-if-artifact-is-deployed.sh "org.icij.datashare:datashare:pom:${DATASHARE_VERSION}:provided"; then
+              curl -f "https://search.maven.org/remotecontent?filepath=org/icij/datashare/datashare/$DATASHARE_VERSION/datashare-$DATASHARE_VERSION.pom" || mvn -s .circleci/resources/maven-release-settings.xml -pl . deploy 
+            fi
+            mvn -s .circleci/resources/maven-release-settings.xml -pl commons-test -am install
+            mvn -s .circleci/resources/maven-release-settings.xml -pl datashare-tasks -am install
+            mvn -s .circleci/resources/maven-release-settings.xml -pl datashare-tasks deploy
+
+  deploy_datashare_api:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+
+    environment:
+      MAVEN_OPTS: "-Xms512m -Xmx1g -Xss10M"
+
+    steps:
+      - checkout
+      - run:
+          name: Start services
+          command: docker-compose up -d --wait --build s3mock
+      - run:
+          name: Configure GPG private key for signing project artifacts in OSS Sonatype
+          shell: /bin/bash
+          command: |
+            echo ${RELEASES_GPG_PRIV_BASE64} | base64 --decode | gpg --batch --no-tty --import --yes
+
+      - run:
+          name: Build and deploy datashare-api
+          no_output_timeout: 1h
+          command: |
+            export DATASHARE_VERSION=$(head pom.xml | grep '<version>[0-9.]\+' | sed 's/<version>\([0-9.]\+\..*\)<\/version>/\1/g' | tr -d '[:space:]')
+            if ! ./.circleci/scripts/check-if-artifact-is-deployed.sh "org.icij.datashare:datashare:pom:${DATASHARE_VERSION}:provided"; then
+              mvn -s .circleci/resources/maven-release-settings.xml -pl . deploy 
+            fi
+            mvn -s .circleci/resources/maven-release-settings.xml -pl datashare-api deploy
+
+  deploy_datashare_cli:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+
+    environment:
+      MAVEN_OPTS: "-Xms512m -Xmx1g -Xss10M"
+
+    steps:
+      - checkout
+      - run:
+          name: Start services
+          command: docker-compose up -d --wait --build s3mock
+      - run:
+          name: Configure GPG private key for signing project artifacts in OSS Sonatype
+          shell: /bin/bash
+          command: |
+            echo ${RELEASES_GPG_PRIV_BASE64} | base64 --decode | gpg --batch --no-tty --import --yes
+
+      - run:
+          name: Build and deploy datashare-cli
+          no_output_timeout: 1h
+          command: |
+            export DATASHARE_VERSION=$(head pom.xml | grep '<version>[0-9.]\+' | sed 's/<version>\([0-9.]\+\..*\)<\/version>/\1/g' | tr -d '[:space:]')
+            if ! ./.circleci/scripts/check-if-artifact-is-deployed.sh "org.icij.datashare:datashare:pom:${DATASHARE_VERSION}:provided"; then
+              mvn -s .circleci/resources/maven-release-settings.xml -pl . deploy 
+            fi
+            mvn -s .circleci/resources/maven-release-settings.xml -pl datashare-cli deploy
+
+workflows:
+  version: 2
+  build_workflow:
+    when:
+      not: << pipeline.parameters.publish_backend_doc >>
+    jobs:
+      - build_back:
+          filters:
+              tags:
+                  only: /^[0-9.]+\..*/
+      - install_elastic_search:
+          requires:
+            - package_back
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - deploy_back:
+          requires:
+            - create_openapi_json
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - build_front:
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - deploy_front:
+          requires:
+            - build_front
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - package_back:
+          requires:
+            - build_back
+            - build_front
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - create_openapi_json:
+          requires:
+            - package_back
+            - install_elastic_search
+          filters:
+            tags:
+              only: /^[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - build_docker:
+          requires:
+            - package_back
+          filters:
+              tags:
+                  only: /^[0-9]+\..*/
+              branches:
+                  ignore: /.*/
+      - build_installers:
+          requires:
+            - package_back
+          filters:
+              tags:
+                  only: /^[0-9]+\..*/
+              branches:
+                  ignore: /.*/
+      - deploy_datashare_tasks:
+          filters:
+            tags:
+              only: /^datashare-tasks\/[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - deploy_datashare_api:
+          filters:
+            tags:
+              only: /^datashare-api\/[0-9]+\..*/
+            branches:
+              ignore: /.*/
+      - deploy_datashare_cli:
+          filters:
+            tags:
+              only: /^datashare-cli\/[0-9]+\..*/
+            branches:
+              ignore: /.*/
+
+  publish_doc_workflow:
+    when: << pipeline.parameters.publish_backend_doc >>
+    jobs:
+      - publish_doc

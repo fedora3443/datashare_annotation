@@ -1,0 +1,10 @@
+Package: datashare
+Replaces: datashare-dist
+Version: [[version]]
+Section: misc
+Priority: low
+Architecture: all
+Description: [[description]]
+Maintainer: ICIJ <datashare@icij.org>
+Depends: openjdk-21-jre, tesseract-ocr
+Recommends: tesseract-ocr-all

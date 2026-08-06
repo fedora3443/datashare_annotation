@@ -1,0 +1,358 @@
+package org.icij.datashare.cli;
+
+import joptsimple.OptionException;
+import org.junit.Rule;
+import org.junit.Before;
+import org.junit.After;
+import org.junit.Test;
+import org.junit.contrib.java.lang.system.ExpectedSystemExit;
+
+import java.io.IOException;
+import java.nio.file.Path;
+
+import static org.fest.assertions.Assertions.assertThat;
+import static org.fest.assertions.MapAssert.entry;
+
+public class DatashareCliTest {
+    private DatashareCli cli = new DatashareCli();
+    @Rule
+    public final ExpectedSystemExit exit = ExpectedSystemExit.none();
+
+    @Before
+    public void setUp() {
+        System.setProperty("user.home", "/home/datashare");
+    }
+
+    @After
+    public void tearDown() {
+        System.clearProperty("user.home");
+    }
+
+    @Test
+    public void test_web_opt() {
+        assertThat(cli.parseArguments(new String[] {"-o true"})).isNotNull();
+        assertThat(cli.isWebServer()).isTrue();
+        assertThat(cli.parseArguments(new String[] {"--mode=TASK_WORKER"})).isNotNull();
+        assertThat(cli.isWebServer()).isFalse();
+        assertThat(cli.parseArguments(new String[] {"--mode=CLI"})).isNotNull();
+        assertThat(cli.isWebServer()).isFalse();
+    }
+
+    @Test
+    public void test_override_opt_last_option_wins() {
+        cli.parseArguments(new String[] {"--mode=SERVER", "--mode=LOCAL"});
+        assertThat(cli.properties).includes(entry("mode", "LOCAL"));
+    }
+
+    @Test
+    public void test_port_opt() {
+        cli.parseArguments(new String[] {"--port=7777"});
+        assertThat(cli.properties).includes(entry("tcpListenPort", "7777"));
+        assertThat(cli.properties).excludes(entry("port", "7777"));
+    }
+
+    @Test
+    public void test_tcp_listen_port_opt() {
+        cli.parseArguments(new String[] {"--tcpListenPort=7777"});
+        assertThat(cli.properties).includes(entry("tcpListenPort", "7777"));
+    }
+
+    @Test
+    public void test_mode_opt() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties).includes(entry("mode", "LOCAL"));
+
+        cli.parseArguments(new String[] {"--mode=SERVER"});
+        assertThat(cli.properties).includes(entry("mode", "SERVER"));
+    }
+
+    @Test
+    public void test_stages_opt() {
+        cli.parseArguments(new String[] {"--stages=SCAN,INDEX,CATEGORIZE,NLP"});
+        assertThat(cli.properties).includes(entry("stages", "SCAN,INDEX,CATEGORIZE,NLP"));
+    }
+
+    @Test
+    public void test_option_not_specified() {
+        cli.parseArguments(new String[] {""});
+
+        assertThat(cli.properties).excludes(entry("oauthClientId", "false"));
+    }
+
+    @Test
+    public void test_option_list_plugins() {
+        cli.parseArguments(new String[] {"--pluginList"});
+        assertThat(cli.properties).includes(entry("pluginList", "true"));
+
+        cli.parseArguments(new String[] {"--pluginList=.*"});
+        assertThat(cli.properties).includes(entry("pluginList", ".*"));
+
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties).excludes(entry("pluginList", "unused"));
+    }
+
+    @Test
+    public void test_get_version() throws IOException {
+        assertThat(cli.getVersion()).isEqualTo("7.0.2");
+    }
+
+    @Test
+    public void test_max_batch_download_size() {
+        cli.parseArguments(new String[] {"--batchDownloadMaxSize", "123"});
+        assertThat(cli.properties).includes(entry("batchDownloadMaxSize", "123"));
+
+        cli.parseArguments(new String[] {"--batchDownloadMaxSize", "123G"});
+        assertThat(cli.properties).includes(entry("batchDownloadMaxSize", "123G"));
+    }
+
+    @Test(expected = OptionException.class)
+    public void test_max_batch_download_size_illegal_value() {
+        cli.asProperties(cli.createParser().parse("--embeddedDocumentDownloadMaxSize", "123A"), null);
+    }
+
+    @Test
+    public void test_embedded_document_download_max_size() {
+        cli.parseArguments(new String[] {"--embeddedDocumentDownloadMaxSize", "123"});
+        assertThat(cli.properties).includes(entry("embeddedDocumentDownloadMaxSize", "123"));
+
+        cli.parseArguments(new String[] {"--embeddedDocumentDownloadMaxSize", "123G"});
+        assertThat(cli.properties).includes(entry("embeddedDocumentDownloadMaxSize", "123G"));
+    }
+
+    @Test(expected = OptionException.class)
+    public void test_embedded_document_download_max_size_illegal_value() {
+        cli.asProperties(cli.createParser().parse("--batchDownloadMaxSize", "123A"), null);
+    }
+    @Test
+    public void test_relative_batch_download_dir() {
+        cli.parseArguments(new String[] {"--batchDownloadDir", "foo"});
+        Path userDir = Path.of(System.getProperty("user.dir"));
+        assertThat(cli.properties).includes(entry("batchDownloadDir", userDir.resolve("foo").toString()));
+    }
+
+    @Test
+    public void test_user_projects_key() {
+        cli.parseArguments(new String[] {"--oauthUserProjectsAttribute", "foo.bar.baz"});
+        assertThat(System.getProperty("datashare.user.projects")).isEqualTo("foo.bar.baz");
+    }
+
+    @Test
+    public void test_absolute_batch_download_dir() {
+        cli.parseArguments(new String[] {"--batchDownloadDir", "/home/foo"});
+        assertThat(cli.properties).includes(entry("batchDownloadDir", "/home/foo"));
+    }
+
+    @Test
+    public void test_no_default_indexing_language_value() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties).excludes(entry("language", null));
+    }
+
+    @Test
+    public void test_has_english_indexing_language_value() {
+        cli.parseArguments(new String[] {"--language", "ENGLISH"});
+        assertThat(cli.properties).includes(entry("language", "ENGLISH"));
+    }
+
+    @Test
+    public void test_digest_project_name_should_be_the_same_as_default_project() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("defaultProject", "local-datashare"));
+        assertThat(cli.properties).includes(entry("digestProjectName", "local-datashare"));
+    }
+
+    @Test
+    public void test_digest_project_name_defaults_to_local_datashare_when_default_project_is_missing() {
+        // Simulates the case where defaultProject is absent from the parsed properties
+        // (e.g. when running in Docker without --defaultProject and a settings file
+        // overrides the parsed options). This should not throw a NullPointerException.
+        DatashareCli spyCli = new DatashareCli() {
+            @Override
+            java.util.Properties asProperties(joptsimple.OptionSet options, String prefix) {
+                java.util.Properties props = super.asProperties(options, prefix);
+                props.remove("defaultProject");
+                return props;
+            }
+        };
+        spyCli.parseArguments(new String[] {});
+        assertThat(spyCli.properties).includes(entry("digestProjectName", "local-datashare"));
+    }
+
+    @Test
+    public void test_digest_project_name_should_be_emptied_if_no_digest_project_flag() {
+        cli.parseArguments(new String[] {"--noDigestProject", "true"});
+        assertThat(cli.properties).includes(entry("defaultProject", "local-datashare"));
+        assertThat(cli.properties).includes(entry("noDigestProject", "true"));
+        assertThat(cli.properties.getProperty("digestProjectName")).isNull();
+    }
+
+    @Test
+    public void test_digest_project_name_should_be_left_as_is_if_provided() {
+        cli.parseArguments(new String[] {"--digestProjectName", "foo"});
+        assertThat(cli.properties).includes(entry("defaultProject", "local-datashare"));
+        assertThat(cli.properties).includes(entry("digestProjectName", "foo"));
+        assertThat(cli.properties).includes(entry("noDigestProject", "false"));
+    }
+
+    @Test
+    public void test_foo_extension_loaded() {
+        cli.parseArguments(new String[] {"--foo", "bar"});
+        assertThat(cli.properties).includes(entry("foo", "bar"));
+    }
+
+    @Test
+    public void test_foo_extension_loaded_help() {
+        cli.parseArguments(new String[] {"-s", "someSettingsPath", "--ext", "foo", "--fooCommand"});
+        assertThat(cli.properties).includes(entry("settings", "someSettingsPath"));
+    }
+
+    @Test
+    public void test_foo_extension_should_exit_with_3_for_unknown_extension_id() {
+        exit.expectSystemExitWithStatus(3);
+        cli.parseArguments(new String[] {"--ext", "bar"});
+        assertThat(cli.properties).excludes(entry("defaultProject", "local-datashare"));
+    }
+
+    @Test
+    public void test_index_timeout_option_exists() {
+        cli.parseArguments(new String[]{});
+        assertThat(cli.properties).includes(entry("indexTimeout","30"));
+        cli.parseArguments(new String[] {"--indexTimeout", "10"});
+        assertThat(cli.properties).includes(entry("indexTimeout","10"));
+    }
+
+    @Test(expected = OptionException.class)
+    public void test_index_timeout_option_is_invalid() {
+        cli.asProperties(cli.createParser().parse("--indexTimeout", "-10"), null);
+    }
+
+    @Test
+    public void test_data_dir_is_based_on_current_user_dir() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("dataDir", "/home/datashare/Datashare"));
+    }
+
+    @Test
+    public void test_elasticsearch_data_path_is_based_on_current_user_dir() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("elasticsearchDataPath", "/home/datashare/.local/share/datashare/es"));
+    }
+
+    @Test
+    public void test_elasticsearch_max_idle_time_is_valid() {
+        cli.parseArguments(new String[] {"--elasticsearchMaxIdleConnectionTime", "29"});
+        assertThat(cli.properties).includes(entry("elasticsearchMaxIdleConnectionTime", "29"));
+    }
+
+    @Test
+    public void test_extensions_dir_is_based_on_current_user_dir() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("extensionsDir", "/home/datashare/.local/share/datashare/extensions"));
+    }
+
+    @Test
+    public void test_plugins_dir_is_based_on_current_user_dir() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("pluginsDir", "/home/datashare/.local/share/datashare/plugins"));
+    }
+
+    @Test
+    public void test_bind_opt() {
+        cli.parseArguments(new String[] {"--bind", "127.0.0.1"});
+        assertThat(cli.properties).includes(entry("bind", "127.0.0.1"));
+    }
+
+    @Test
+    public void test_bind_short_opt() {
+        cli.parseArguments(new String[] {"-b", "0.0.0.0"});
+        assertThat(cli.properties).includes(entry("bind", "0.0.0.0"));
+    }
+
+    @Test
+    public void test_mode_is_local() {
+        assertThat(Mode.LOCAL.isLocal()).isTrue();
+        assertThat(Mode.EMBEDDED.isLocal()).isTrue();
+        assertThat(Mode.SERVER.isLocal()).isFalse();
+        assertThat(Mode.CLI.isLocal()).isFalse();
+        assertThat(Mode.TASK_WORKER.isLocal()).isFalse();
+    }
+
+    @Test
+    public void test_bind_opt_not_set_by_default() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties.getProperty("bind")).isNull();
+    }
+
+    @Test
+    public void test_policy_reload_interval_absent_when_not_set() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties.getProperty("policyReloadInterval")).isNull();
+    }
+
+    @Test
+    public void test_policy_reload_interval_propagated_when_set() {
+        cli.parseArguments(new String[] {"--policyReloadInterval", "5000"});
+        assertThat(cli.properties).includes(entry("policyReloadInterval", "5000"));
+    }
+
+    @Test
+    public void test_queue_capacity_exists() {
+        cli.parseArguments(new String[] {});
+        assertThat(cli.properties).includes(entry("queueCapacity", "1000000")); // 1e6
+        cli.parseArguments(new String[] {"--queueCapacity", "10"});
+        assertThat(cli.properties).includes(entry("queueCapacity", "10"));
+    }
+
+    @Test
+    public void test_ocr_strategy_opt() {
+        cli.parseArguments(new String[] {"--ocrStrategy=AUTO"});
+        assertThat(cli.properties).includes(entry("ocrStrategy", "AUTO"));
+    }
+
+    @Test
+    public void test_ocr_strategy_opt_absent_by_default() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties.containsKey("ocrStrategy")).isFalse();
+    }
+
+    @Test(expected = OptionException.class)
+    public void test_ocr_strategy_opt_rejects_invalid_value() {
+        cli.asProperties(cli.createParser().parse("--ocrStrategy", "NOPE"), null);
+    }
+
+    @Test
+    public void test_max_embed_depth_opt() {
+        cli.parseArguments(new String[] {"--maxEmbedDepth=5"});
+        assertThat(cli.properties).includes(entry("maxEmbedDepth", "5"));
+    }
+
+    @Test
+    public void test_max_embed_depth_opt_defaults_to_20() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties).includes(entry("maxEmbedDepth", "20"));
+    }
+
+    @Test
+    public void test_parse_timeout_opt() {
+        cli.parseArguments(new String[] {"--parseTimeout", "48h"});
+        assertThat(cli.properties).includes(entry("parseTimeout", "48h"));
+    }
+
+    @Test
+    public void test_parse_timeout_opt_defaults_to_24h() {
+        cli.parseArguments(new String[] {""});
+        assertThat(cli.properties).includes(entry("parseTimeout", "24h"));
+    }
+
+    @Test
+    public void test_artifacts_opt_with_value() {
+        cli.parseArguments(new String[] {"--artifacts", "raw"});
+        assertThat(cli.properties).includes(entry("artifacts", "raw"));
+    }
+
+    @Test
+    public void test_artifacts_opt_bare_flag() {
+        cli.parseArguments(new String[] {"--artifacts"});
+        assertThat(cli.properties).includes(entry("artifacts", "true"));
+    }
+}
