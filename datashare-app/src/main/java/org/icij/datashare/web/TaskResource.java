@@ -566,9 +566,10 @@ public class TaskResource {
         
         List<String> tasks = new LinkedList<>();
         // First enqueue documents without annotation
-        tasks.add(taskManager.startTask(EnqueueFromIndexTask.class, (User) context.currentUser(), propertiesToMap(properties)));
+        Map<String, Object> propertiesMap = PropertiesProvider.propertiesToMap(properties);
+        tasks.add(taskManager.startTask(EnqueueFromIndexTask.class, (User) context.currentUser(), propertiesMap));
         // Then process them with AnnotateTask
-        tasks.add(taskManager.startTask(AnnotateTask.class, (User) context.currentUser(), propertiesToMap(properties)));
+        tasks.add(taskManager.startTask(AnnotateTask.class, (User) context.currentUser(), propertiesMap));
         
         return new JsonPayload(new TasksResponse(tasks));
     }
