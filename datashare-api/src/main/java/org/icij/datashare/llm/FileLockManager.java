@@ -1,4 +1,4 @@
-package org.icij.datashare.text.llm;
+package org.icij.datashare.llm;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
