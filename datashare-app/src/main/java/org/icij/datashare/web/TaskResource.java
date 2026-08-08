@@ -548,12 +548,15 @@ public class TaskResource {
             This endpoint finds all documents that don't have an annotation yet (annotation field is missing or empty)
             and processes them through the LLM annotation pipeline.
             """,
-            requestBody = @RequestBody(description = "wrapper for options json", required = true, content = @Content(schema = @Schema(implementation = OptionsWrapper.class))))
+            parameters = @Parameter(name = "options", description = "JSON options", in = ParameterIn.QUERY, schema = @Schema(type = "string")))
     @ApiResponse(responseCode = "200", description = "returns 200 and the created task ids", content = @Content(schema = @Schema(implementation = TasksResponse.class)))
-    @Post("/annotate/:projectName")
-    public Payload annotate(@Parameter(name = "projectName", description = "name of the project to annotate", in = ParameterIn.PATH) final String projectName, final OptionsWrapper<String> optionsWrapper, Context context) throws IOException {
+    @Get("/annotate/:projectName")
+    public Payload annotate(@Parameter(name = "projectName", description = "name of the project to annotate", in = ParameterIn.PATH) final String projectName, 
+                           @Parameter(name = "options", description = "JSON options as query parameter", in = ParameterIn.QUERY) final String options, 
+                           Context context) throws IOException {
         modeVerifier.checkAllowedMode(Mode.LOCAL, Mode.EMBEDDED);
-        Properties properties = applyProjectProperties(optionsWrapper);
+        Properties properties = propertiesProvider.createOverriddenWith(new Properties());
+        properties = TaskResource.applyProjectTo(properties);
         
         // Add search query to find documents without annotation
         // Query to find documents where annotation field doesn't exist or is null/empty
