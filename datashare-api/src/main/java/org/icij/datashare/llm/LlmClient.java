@@ -1,4 +1,4 @@
-package org.icij.datashare.text.llm;
+package org.icij.datashare.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
