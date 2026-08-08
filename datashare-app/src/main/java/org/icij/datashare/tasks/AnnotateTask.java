@@ -12,7 +12,7 @@ import org.icij.datashare.asynctasks.temporal.TemporalSingleActivityWorkflow;
 import org.icij.datashare.extract.DocumentCollectionFactory;
 import org.icij.datashare.llm.FileLockManager;
 import org.icij.datashare.llm.LlmClient;
-import org.icij.datashare.llm.LlmClient.LlmAnnotationResult;
+import org.icij.datashare.llm.LlmClient.LlmResult;
 import org.icij.datashare.monitoring.Monitorable;
 import org.icij.datashare.text.DocReference;
 import org.icij.datashare.text.Document;
@@ -163,7 +163,7 @@ public class AnnotateTask extends PipelineTask<String> implements Monitorable {
         logger.info("Annotating document {}", doc.getId());
         
         try {
-            LlmAnnotationResult result = llmClient.annotate(content);
+            LlmResult result = llmClient.analyze(content);
             
             // Update document metadata with annotation results
             Map<String, Object> updatedMetadata = new HashMap<>(metadata != null ? metadata : Collections.emptyMap());
