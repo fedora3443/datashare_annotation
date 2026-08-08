@@ -81,9 +81,8 @@ public class FileLockManager implements AutoCloseable {
         try {
             lock = channel.lock();
             LOGGER.info("Acquired exclusive lock on {}", lockFilePath);
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             LOGGER.error("Failed to acquire lock: {}", e.getMessage());
-            Thread.currentThread().interrupt();
             close();
             throw new IOException("Lock acquisition failed", e);
         }
