@@ -348,15 +348,16 @@ public class TaskResource {
             requestBody = @RequestBody(description = "the json used to wrap the query", required = true, content = @Content(schema = @Schema(implementation = OptionsWrapper.class))))
     @ApiResponse(responseCode = "200", description = "returns 200 and the json task id", useReturnTypeSchema = true)
     @Post("/batchDownload")
-    public TaskResponse batchDownload(final OptionsWrapper<Object> optionsWrapper, Context context) throws IOException {
-        Map<String, Object> options = optionsWrapper.getOptions();
+    public TaskResponse batchDownload(final OptionsWrapper<String> optionsWrapper, Context context) throws IOException {
+        Map<String, String> options = optionsWrapper.getOptions();
         Properties properties = applyProjectProperties(optionsWrapper);
         Path downloadDir = get(properties.getProperty(BATCH_DOWNLOAD_DIR_OPT));
         if (!downloadDir.toFile().exists()) downloadDir.toFile().mkdirs();
-        String query = options.get("query") instanceof Map ? JsonObjectMapper.writeValueAsString(options.get("query")) : (String) options.get("query");
-        String uri = (String) options.get("uri");
+        String query = options.get("query");
+        String uri = options.get("uri");
         boolean batchDownloadEncrypt = parseBoolean(properties.getOrDefault("batchDownloadEncrypt", "false").toString());
-        List<String> projectIds = (List<String>) options.get("projectIds");
+        String projectIdsStr = options.get("projectIds");
+        List<String> projectIds = projectIdsStr != null ? java.util.Arrays.asList(projectIdsStr.split(",")) : java.util.Collections.emptyList();
 
         BatchDownload batchDownload = new BatchDownload(projectIds.stream().map(Project::project).collect(toList()), (User) context.currentUser(), query, uri, downloadDir, batchDownloadEncrypt);
 
