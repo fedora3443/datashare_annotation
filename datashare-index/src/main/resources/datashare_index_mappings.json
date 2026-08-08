@@ -146,6 +146,16 @@
     "isHidden": {
       "type": "boolean",
       "null_value": false
+    },
+    "annotation": {
+      "type": "text",
+      "analyzer": "folding"
+    },
+    "annotation_mails": {
+      "type": "keyword"
+    },
+    "annotation_passwords": {
+      "type": "keyword"
     }
   }
 }

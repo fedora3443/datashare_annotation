@@ -1,44 +1,70 @@
+```
+# Compiled and build artifacts
+*.class
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.out
 target/
-out/
-dependency-reduced-pom.xml
-.idea/
-*.iml
-dist/
-elasticsearch/
-elasticsearch.yaml
-backups/
-index/
-plugins/
-extensions/
-logs/
-/app
-pom.xml.versionsBackup
-.gitsecret/keys/random_seed
-datashare-web/src/main/resources/secret.properties
-# VS Code
-.project
-.settings
-.classpath
-doc/
-docs/superpowers/
-work
+build/
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.gradle/
+
+# Logs and temp files
+*.log
+*.tmp
 *.swp
+*.swo
 
-# Mac jenv properties
-.java-version
+# Environment
+.env
+.env.local
+*.env.*
 
-# Flattened maven plugin
-**/.flattened-pom.xml
+# Editors
+.vscode/
+.idea/
 
-# Devenv Properties File
-datashare-devenv.properties
+# System files
+.DS_Store
+Thumbs.db
 
-# Local kc-swarm orchestration (scripts + worktrees)
-scripts/kc-swarm/
-.worktrees/
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
-# Local swarm runtime state
-.claude/
-.claude-flow/
-.swarm/
-ruvector.db
+# Archives
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```
