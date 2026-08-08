@@ -542,6 +542,34 @@ public class TaskResource {
         return new JsonPayload(new TasksResponse(tasks));
     }
 
+    @Operation(description = """
+            Annotates documents using LLM for the given project.
+            
+            This endpoint finds all documents that don't have an annotation yet (annotation field is missing or empty)
+            and processes them through the LLM annotation pipeline.
+            """,
+            requestBody = @RequestBody(description = "wrapper for options json", required = true, content = @Content(schema = @Schema(implementation = OptionsWrapper.class))))
+    @ApiResponse(responseCode = "200", description = "returns 200 and the created task ids", content = @Content(schema = @Schema(implementation = TasksResponse.class)))
+    @Post("/annotate/:projectName")
+    public Payload annotate(@Parameter(name = "projectName", description = "name of the project to annotate", in = ParameterIn.PATH) final String projectName, final OptionsWrapper<String> optionsWrapper, Context context) throws IOException {
+        modeVerifier.checkAllowedMode(Mode.LOCAL, Mode.EMBEDDED);
+        Properties properties = applyProjectProperties(optionsWrapper);
+        
+        // Add search query to find documents without annotation
+        // Query to find documents where annotation field doesn't exist or is null/empty
+        String searchQuery = "{\"bool\": {\"must_not\": [{\"exists\": {\"field\": \"annotation\"}}]}}";
+        properties.put(SEARCH_QUERY_OPT, searchQuery);
+        properties.put(DEFAULT_PROJECT_OPT, projectName);
+        
+        List<String> tasks = new LinkedList<>();
+        // First enqueue documents without annotation
+        tasks.add(taskManager.startTask(EnqueueFromIndexTask.class, (User) context.currentUser(), propertiesToMap(properties)));
+        // Then process them with AnnotateTask
+        tasks.add(taskManager.startTask(AnnotateTask.class, (User) context.currentUser(), propertiesToMap(properties)));
+        
+        return new JsonPayload(new TasksResponse(tasks));
+    }
+
     public Properties applyProjectProperties(OptionsWrapper optionsWrapper) {
         Properties properties = propertiesProvider.createOverriddenWith(optionsWrapper.getOptions());
         return TaskResource.applyProjectTo(properties);
