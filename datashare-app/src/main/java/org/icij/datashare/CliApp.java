@@ -20,6 +20,7 @@ import org.icij.datashare.project.admin.ProjectStats;
 import org.icij.datashare.tasks.ArtifactTask;
 import org.icij.datashare.tasks.CreateNlpBatchesFromIndex;
 import org.icij.datashare.tasks.CategorizeTask;
+import org.icij.datashare.tasks.AnnotateTask;
 import org.icij.datashare.tasks.DatashareTaskFactory;
 import org.icij.datashare.asynctasks.TaskManager;
 import org.icij.datashare.tasks.DeduplicateTask;
@@ -199,6 +200,10 @@ class CliApp {
 
         if (pipeline.has(Stage.CATEGORIZE)) {
             taskIds.add(taskManager.startTask(CategorizeTask.class, nullUser(), propertiesToMap(properties)));
+        }
+
+        if (pipeline.has(Stage.ANNOTATE)) {
+            taskIds.add(taskManager.startTask(AnnotateTask.class, nullUser(), propertiesToMap(properties)));
         }
 
         if (pipeline.has(Stage.CREATENLPBATCHESFROMIDX)) {

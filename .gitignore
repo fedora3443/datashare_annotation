@@ -1,44 +1,16 @@
+```
+# Compiled and build artifacts
+*.class
+*.o
+*.obj
+*.out
+# Dependencies
 target/
-out/
-dependency-reduced-pom.xml
+.gradle/
+# Logs and temp files
+*.log
+*.tmp
+# Editors
+.vscode/
 .idea/
-*.iml
-dist/
-elasticsearch/
-elasticsearch.yaml
-backups/
-index/
-plugins/
-extensions/
-logs/
-/app
-pom.xml.versionsBackup
-.gitsecret/keys/random_seed
-datashare-web/src/main/resources/secret.properties
-# VS Code
-.project
-.settings
-.classpath
-doc/
-docs/superpowers/
-work
-*.swp
-
-# Mac jenv properties
-.java-version
-
-# Flattened maven plugin
-**/.flattened-pom.xml
-
-# Devenv Properties File
-datashare-devenv.properties
-
-# Local kc-swarm orchestration (scripts + worktrees)
-scripts/kc-swarm/
-.worktrees/
-
-# Local swarm runtime state
-.claude/
-.claude-flow/
-.swarm/
-ruvector.db
+```
