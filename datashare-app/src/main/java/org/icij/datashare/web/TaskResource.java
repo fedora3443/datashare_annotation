@@ -555,7 +555,7 @@ public class TaskResource {
                            @Parameter(name = "options", description = "JSON options as query parameter", in = ParameterIn.QUERY) final String options, 
                            Context context) throws IOException {
         modeVerifier.checkAllowedMode(Mode.LOCAL, Mode.EMBEDDED);
-        Properties properties = propertiesProvider.createOverriddenWith(new Properties());
+        Properties properties = propertiesProvider.createOverriddenWith(Map.of());
         properties = TaskResource.applyProjectTo(properties);
         
         // Add search query to find documents without annotation
@@ -574,7 +574,7 @@ public class TaskResource {
         return new JsonPayload(new TasksResponse(tasks));
     }
 
-    public Properties applyProjectProperties(OptionsWrapper optionsWrapper) {
+    public Properties applyProjectProperties(OptionsWrapper<String> optionsWrapper) {
         Properties properties = propertiesProvider.createOverriddenWith(optionsWrapper.getOptions());
         return TaskResource.applyProjectTo(properties);
     }
